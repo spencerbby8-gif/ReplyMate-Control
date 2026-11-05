@@ -53,7 +53,7 @@ async function main() {
 
   const parsed = new URL(projectUrl);
   console.log(`Target project : ${parsed.host}`);
-  console.log(`Pooler host    : ${new URL(poolerUrl).host}:${new URL(poolerUrl).port}`);
+  console.log(`Pooler host    : ${new URL(poolerUrl).host}`);
   console.log(`Pooler database: ${new URL(poolerUrl).pathname.slice(1)}`);
   console.log(`Keys present   : publishable=${Boolean(publishable)} secret=${Boolean(secret)}`);
   console.log("Mode           : READ ONLY (SELECT / catalogs only)");
@@ -87,12 +87,17 @@ async function main() {
              c.relrowsecurity as rls_enabled,
              c.relforcerowsecurity as rls_forced,
              pg_catalog.pg_get_userbyid(c.relowner) as owner,
-             (select reltuples::bigint from pg_class where oid = c.oid) as approx_rows
+             case
+               when (select reltuples::bigint from pg_class where oid = c.oid) < 0
+                 then null
+               else (select reltuples::bigint from pg_class where oid = c.oid)
+             end as approx_rows
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and c.relkind = 'r'
       order by c.relname`);
-    table(tables, ["table_name", "rls_enabled", "rls_forced", "owner", "approx_rows"]);
+    table(tables, ["table_name", "rls_enabled", "rls_forced", "owner", "approx_rows*"]);
+    console.log("  * approx_rows comes from pg_class.reltuples, which is NULL until ANALYZE has run.\n    It is a planner estimate, never a count, and is not used for any decision here.");
 
     section("3. Are any control-plane (ctl_*) tables present in this project?");
     const ctl = tables.filter((t) => String(t.table_name).startsWith("ctl_"));
