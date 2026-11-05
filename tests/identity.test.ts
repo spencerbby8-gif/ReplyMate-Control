@@ -82,11 +82,82 @@ describe("local strategy", () => {
 });
 
 describe("supabase strategy fails CLOSED when unconfigured", () => {
-  it("reports itself unconfigured without URL and anon key", () => {
-    // No NEXT_PUBLIC_SUPABASE_* in the test environment.
+  it("reports itself unconfigured without URL and publishable key", () => {
+    // vitest.config.ts blanks every SUPABASE_* variable so this suite is
+    // hermetic: the hosting platform injects real credentials into the process
+    // environment, and a test whose result depends on that is not a test.
     const state = supabaseIdentity.isConfigured();
     expect(state.configured).toBe(false);
-    expect(state.detail).toMatch(/NEXT_PUBLIC_SUPABASE_URL/);
+    expect(state.detail).toMatch(/SUPABASE_PROJECT_URL/);
+    expect(state.detail).toMatch(/SUPABASE_PUBLISHABLE_KEY/);
+  });
+
+  it("treats a blank credential as absent, not as configured-with-empty-string", () => {
+    const previous = { ...process.env };
+    process.env.SUPABASE_PROJECT_URL = "https://example.supabase.co";
+    process.env.SUPABASE_PUBLISHABLE_KEY = "   ";
+    process.env.SUPABASE_SECRET_KEY = "";
+    try {
+      const state = supabaseIdentity.isConfigured();
+      expect(state.configured).toBe(false);
+    } finally {
+      process.env = previous;
+    }
+  });
+
+  it("reports configured once real coordinates are present", () => {
+    const previous = { ...process.env };
+    process.env.SUPABASE_PROJECT_URL = "https://example.supabase.co";
+    process.env.SUPABASE_PUBLISHABLE_KEY = "sb_publishable_test_placeholder_value";
+    process.env.SUPABASE_SECRET_KEY = "sb_secret_test_placeholder_value";
+    try {
+      const state = supabaseIdentity.isConfigured();
+      expect(state.configured).toBe(true);
+      expect(state.detail).toMatch(/invitations available/i);
+    } finally {
+      process.env = previous;
+    }
+  });
+
+  it("reports verification available but invitations refused when only the publishable key exists", () => {
+    const previous = { ...process.env };
+    process.env.SUPABASE_PROJECT_URL = "https://example.supabase.co";
+    process.env.SUPABASE_PUBLISHABLE_KEY = "sb_publishable_test_placeholder_value";
+    delete process.env.SUPABASE_SECRET_KEY;
+    try {
+      const state = supabaseIdentity.isConfigured();
+      expect(state.configured).toBe(true);
+      expect(state.detail).toMatch(/SUPABASE_SECRET_KEY/);
+      expect(state.detail).toMatch(/refused/i);
+    } finally {
+      process.env = previous;
+    }
+  });
+
+  it("falls back to the legacy NEXT_PUBLIC_ names when the new ones are absent", () => {
+    const previous = { ...process.env };
+    delete process.env.SUPABASE_PROJECT_URL;
+    delete process.env.SUPABASE_PUBLISHABLE_KEY;
+    process.env.NEXT_PUBLIC_SUPABASE_URL = "https://legacy.supabase.co";
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "legacy-anon-placeholder";
+    try {
+      expect(supabaseIdentity.isConfigured().configured).toBe(true);
+    } finally {
+      process.env = previous;
+    }
+  });
+
+  it("exposes the project ref without exposing any key", () => {
+    const previous = { ...process.env };
+    process.env.SUPABASE_PROJECT_URL = "https://xdcsxxwhvpiissetbrdr.supabase.co";
+    process.env.SUPABASE_PUBLISHABLE_KEY = "sb_publishable_test_placeholder_value";
+    try {
+      const status = identityStatus();
+      expect(status.projectRef).toBe("xdcsxxwhvpiissetbrdr");
+      expect(JSON.stringify(status)).not.toContain("sb_publishable_test_placeholder_value");
+    } finally {
+      process.env = previous;
+    }
   });
 
   it("refuses to verify rather than falling back to local hashes", async () => {

@@ -105,7 +105,7 @@ export default async function UsagePage() {
                 icon={BarChart3}
                 title="Usage telemetry unavailable"
                 reason={usage.error}
-                nextStep="Set NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY in the server environment, then reload. No numbers are estimated in the meantime."
+                nextStep="Set SUPABASE_PROJECT_URL, SUPABASE_PUBLISHABLE_KEY and SUPABASE_SECRET_KEY in the server environment, then reload. No numbers are estimated in the meantime."
                 tone="waiting"
               />
             ) : usage.data.length === 0 ? (

@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { env, supabaseBridgeConfigured } from "@/config/env";
+import { env, supabase, supabaseBridgeConfigured, supabaseProjectRef } from "@/config/env";
 import { assertSafeSelect, checkTableAccess, PrivacyViolation } from "@/lib/privacy/guard";
 
 /**
@@ -17,6 +17,8 @@ import { assertSafeSelect, checkTableAccess, PrivacyViolation } from "@/lib/priv
 export type BridgeStatus = {
   configured: boolean;
   projectUrl: string | null;
+  projectRef: string | null;
+  keyFormat: string;
   mode: "live" | "unconfigured";
   authProvider: typeof env.AUTH_PROVIDER;
   reason: string;
@@ -26,19 +28,24 @@ export function bridgeStatus(): BridgeStatus {
   if (!supabaseBridgeConfigured) {
     return {
       configured: false,
-      projectUrl: env.NEXT_PUBLIC_SUPABASE_URL ?? null,
+      projectUrl: supabase.url,
+      projectRef: supabaseProjectRef(),
+      keyFormat: supabase.keyFormat,
       mode: "unconfigured",
       authProvider: env.AUTH_PROVIDER,
       reason:
-        "NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY are not all present. The bridge stays closed rather than inventing data.",
+        "SUPABASE_PROJECT_URL, SUPABASE_PUBLISHABLE_KEY and SUPABASE_SECRET_KEY are not all present. The bridge stays closed rather than inventing data.",
     };
   }
   return {
     configured: true,
-    projectUrl: env.NEXT_PUBLIC_SUPABASE_URL ?? null,
+    projectUrl: supabase.url,
+    projectRef: supabaseProjectRef(),
+    keyFormat: supabase.keyFormat,
     mode: "live",
     authProvider: env.AUTH_PROVIDER,
-    reason: "Service-role credentials present. Allow-listed, read-only queries are permitted.",
+    reason:
+      "Secret key present. Allow-listed, read-only queries are permitted. The secret key bypasses RLS, so the allow-list in lib/privacy/guard.ts is the only thing standing between this platform and ReplyMate end-user content.",
   };
 }
 
@@ -51,7 +58,7 @@ export function supabaseAdmin(): SupabaseClient {
     );
   }
   if (!cached) {
-    cached = createClient(env.NEXT_PUBLIC_SUPABASE_URL!, env.SUPABASE_SERVICE_ROLE_KEY!, {
+    cached = createClient(supabase.url!, supabase.secretKey!, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
   }
@@ -73,7 +80,7 @@ export async function probeSupabaseReachable(): Promise<{
   httpStatus: number | null;
   error: string | null;
 }> {
-  const url = env.NEXT_PUBLIC_SUPABASE_URL;
+  const url = supabase.url;
   if (!url) return { reachable: false, latencyMs: 0, httpStatus: null, error: "no project url configured" };
   const started = Date.now();
   try {

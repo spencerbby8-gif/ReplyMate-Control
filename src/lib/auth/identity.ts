@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { env, supabaseBridgeConfigured } from "@/config/env";
+import { env, supabase, supabaseBridgeConfigured } from "@/config/env";
 import { hashPassword, verifyPassword as verifyLocalPassword } from "./crypto";
 
 /**
@@ -91,14 +91,43 @@ export async function verifyLocal(password: string, storedHash: string | null): 
 // Supabase strategy
 // ---------------------------------------------------------------------------
 
+/**
+ * Credentials are read at CALL time, not import time.
+ *
+ * Two reasons: a deployment can be reconfigured without a rebuild, and the
+ * strategy becomes testable in both states. Precedence mirrors config/env.ts:
+ * new-format names first, legacy names as fallback.
+ */
+/** An empty or blank variable means "not configured", never "configured blank". */
+function nonEmpty(...values: Array<string | undefined | null>): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return null;
+}
+
+function supabaseCredentials() {
+  return {
+    url: nonEmpty(process.env.SUPABASE_PROJECT_URL, process.env.NEXT_PUBLIC_SUPABASE_URL),
+    publishableKey: nonEmpty(
+      process.env.SUPABASE_PUBLISHABLE_KEY,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    ),
+    secretKey: nonEmpty(process.env.SUPABASE_SECRET_KEY, process.env.SUPABASE_SERVICE_ROLE_KEY),
+  };
+}
+
 let supabaseAuthClient: SupabaseClient | null = null;
+let supabaseAuthClientFor = "";
 
 function supabaseAuth(): SupabaseClient | null {
-  const url = env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) return null;
-  if (!supabaseAuthClient) {
-    supabaseAuthClient = createClient(url, anonKey, {
+  const { url, publishableKey } = supabaseCredentials();
+  if (!url || !publishableKey) return null;
+  // Rebuild if the coordinates changed, so a cached client cannot outlive a
+  // credential rotation.
+  if (!supabaseAuthClient || supabaseAuthClientFor !== `${url}|${publishableKey.length}`) {
+    supabaseAuthClientFor = `${url}|${publishableKey.length}`;
+    supabaseAuthClient = createClient(url, publishableKey, {
       auth: {
         // The returned Supabase session is discarded: this application issues its
         // own digest-stored cookie. Persisting a second session would create two
@@ -113,10 +142,9 @@ function supabaseAuth(): SupabaseClient | null {
 }
 
 function supabaseServiceClient(): SupabaseClient | null {
-  const url = env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !serviceKey) return null;
-  return createClient(url, serviceKey, {
+  const { url, secretKey } = supabaseCredentials();
+  if (!url || !secretKey) return null;
+  return createClient(url, secretKey, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 }
@@ -128,20 +156,21 @@ export const supabaseIdentity: IdentityProvider = {
   invitationTransport: "supabase-email",
 
   isConfigured() {
-    const hasAuth = Boolean(env.NEXT_PUBLIC_SUPABASE_URL && env.NEXT_PUBLIC_SUPABASE_ANON_KEY);
-    const hasService = Boolean(env.SUPABASE_SERVICE_ROLE_KEY);
+    const { url, publishableKey, secretKey } = supabaseCredentials();
+    const hasAuth = Boolean(url && publishableKey);
+    const hasSecret = Boolean(secretKey);
     if (!hasAuth) {
       return {
         configured: false,
         detail:
-          "NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY are required to verify a password against Supabase Auth.",
+          "SUPABASE_PROJECT_URL and SUPABASE_PUBLISHABLE_KEY are required to verify a password against Supabase Auth.",
       };
     }
-    if (!hasService) {
+    if (!hasSecret) {
       return {
         configured: true,
         detail:
-          "Password verification available. Invitations need SUPABASE_SERVICE_ROLE_KEY (auth.admin.inviteUserByEmail) and are refused without it.",
+          "Password verification available. Invitations need SUPABASE_SECRET_KEY (auth.admin.inviteUserByEmail) and are refused without it.",
       };
     }
     return { configured: true, detail: "Password verification and admin invitations available." };
@@ -192,7 +221,7 @@ export const supabaseIdentity: IdentityProvider = {
         ok: false,
         code: "provider_unavailable",
         reason:
-          "Inviting through Supabase Auth needs SUPABASE_SERVICE_ROLE_KEY. Refusing to create a control-plane-only invite that the operator would believe is a Supabase identity.",
+          "Inviting through Supabase Auth needs SUPABASE_SECRET_KEY. Refusing to create a control-plane-only invite that the operator would believe is a Supabase identity.",
       };
     }
 
@@ -238,5 +267,14 @@ export function identityStatus() {
     mfaVerifier: provider.mfaVerifier,
     invitationTransport: provider.invitationTransport,
     bridgeConfigured: supabaseBridgeConfigured,
+    projectRef: (() => {
+      const { url } = supabaseCredentials();
+      if (!url) return null;
+      try {
+        return new URL(url).host.split(".")[0] ?? null;
+      } catch {
+        return null;
+      }
+    })(),
   };
 }

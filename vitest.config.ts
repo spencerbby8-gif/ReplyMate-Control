@@ -25,6 +25,18 @@ export default defineConfig({
       CONTROL_ENC_KEY: "vitest-only-fixture-key-not-a-real-secret-0000",
       SESSION_COOKIE_NAME: "rmctl_session",
       AUTH_PROVIDER: "local",
+      // Explicitly EMPTY. The hosting platform injects real Supabase credentials
+      // into the process environment; without these overrides the unit suite
+      // would inherit them and its "unconfigured" assertions would depend on
+      // wherever it happened to run. Live behaviour against the real project is
+      // asserted separately by scripts/verify-integration.ts (35 checks).
+      SUPABASE_PROJECT_URL: "",
+      SUPABASE_PUBLISHABLE_KEY: "",
+      SUPABASE_SECRET_KEY: "",
+      SUPABASE_TRANSACTION_POOLER: "",
+      NEXT_PUBLIC_SUPABASE_URL: "",
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: "",
+      SUPABASE_SERVICE_ROLE_KEY: "",
       AIOPS_PROVIDER: "none",
       REPLYMATE_REPO: "spencerbby8-gif/ReplyMate",
     },
