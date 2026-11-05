@@ -115,6 +115,74 @@ export const env: Env = parsed.data;
 
 export const isProduction = env.NODE_ENV === "production";
 
+// ---------------------------------------------------------------------------
+// Leak guard — fails at import time, not at review time
+// ---------------------------------------------------------------------------
+
+/**
+ * Prefixes that are ALWAYS secret, in both the current and legacy key schemes.
+ *
+ * A bare `eyJ…` JWT is deliberately NOT in this list. Supabase's legacy *anon*
+ * key is a JWT with `role: "anon"` and is public by design — the ReplyMate
+ * Android app embeds it, and `docs/supabase/README.md` states the database is
+ * guarded by RLS rather than by key secrecy. Rejecting it would break a correct
+ * configuration. What must be rejected is a JWT carrying `role: "service_role"`,
+ * which is handled below by decoding the claim instead of matching the shape.
+ */
+const SECRET_SHAPED = /^(sb_secret_|sk-|sbp_|gh[pousr]_|xox[baprs]-)/;
+
+/**
+ * Throws if secret-shaped material is reachable through a `NEXT_PUBLIC_*` name.
+ *
+ * Next.js inlines every `NEXT_PUBLIC_*` variable into the browser bundle at
+ * BUILD time, so a secret behind that prefix is published to every visitor,
+ * every Android WebView and the public internet. The mistake is invisible in
+ * review and trivial to make — someone "just trying to get the client working"
+ * renames `SUPABASE_SECRET_KEY` to `NEXT_PUBLIC_SUPABASE_SECRET_KEY` and the app
+ * still runs.
+ *
+ * This runs at module import, so the build and the server both refuse to start.
+ * It names the offending variables and never prints their values.
+ */
+export function assertNoSecretInPublicVars(
+  source: Record<string, string | undefined> = process.env,
+): void {
+  const offenders: string[] = [];
+
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith("NEXT_PUBLIC_") || !value) continue;
+
+    if (SECRET_SHAPED.test(value)) {
+      offenders.push(key);
+      continue;
+    }
+
+    // A Supabase JWT carries its role in the payload claim. A service_role JWT in
+    // a client bundle would hand every visitor full database access, bypassing
+    // RLS entirely — so decode and check rather than guess from the shape.
+    if (value.startsWith("eyJ")) {
+      try {
+        const part = value.split(".")[1];
+        if (!part) continue;
+        const payload = JSON.parse(Buffer.from(part, "base64").toString("utf8")) as { role?: unknown };
+        if (payload?.role === "service_role") offenders.push(`${key}(role=service_role)`);
+      } catch {
+        // Not a decodable JWT — nothing further to check.
+      }
+    }
+  }
+
+  if (offenders.length > 0) {
+    throw new Error(
+      `Secret material is exposed through NEXT_PUBLIC_* and would be inlined into the browser bundle: ${[
+        ...new Set(offenders),
+      ].join(", ")}. Move it to a non-prefixed variable; only publishable/anon material may be prefixed.`,
+    );
+  }
+}
+
+assertNoSecretInPublicVars();
+
 /**
  * Resolved Supabase coordinates.
  *
