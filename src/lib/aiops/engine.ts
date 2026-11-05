@@ -300,6 +300,35 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "supabase_audit",
+    description: "Live migration-ledger agreement between the repository and the production database.",
+    keywords: /\b(migration|migrations|ledger|schema_migrations|drift|0001|0002|0003|0004|rls|policy|policies)\b/i,
+    run: async () => {
+      const { compareLiveToRepository } = await import("@/lib/supabase/migrations");
+      const comparison = await compareLiveToRepository();
+      return {
+        data: comparison,
+        render: (data: never) => {
+          const d = data as Awaited<ReturnType<typeof compareLiveToRepository>>;
+          if (d.errors.length > 0) {
+            return `The ledger could not be compared: ${d.errors.join(" ")} I am not going to guess whether the two agree.`;
+          }
+          const lines = [
+            d.ok
+              ? `Live and documented ledgers AGREE: versions [${d.live.join(", ")}]. No missing, duplicated or unapplied migration.`
+              : `DRIFT DETECTED. live [${d.live.join(", ")}] vs documented [${d.documented.join(", ")}].`,
+          ];
+          if (d.missing.length > 0) lines.push(`Documented but NOT applied live: v${d.missing.join(", v")}.`);
+          if (d.undocumented.length > 0) lines.push(`Applied live but NOT documented: v${d.undocumented.join(", v")}.`);
+          if (d.duplicated.length > 0) lines.push(`Duplicated versions: v${d.duplicated.join(", v")}.`);
+          if (!d.contiguous && d.live.length > 0) lines.push("The live sequence has a gap.");
+          lines.push("This is a read-only comparison. Nothing here applies or repairs a migration.");
+          return lines.join("\n");
+        },
+      };
+    },
+  },
+  {
     name: "my_permissions",
     description: "What the asking administrator is allowed to do.",
     keywords: /\b(my permission|permissions|what can i|allowed|capabilit|access)\b/i,
