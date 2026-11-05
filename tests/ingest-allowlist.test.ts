@@ -425,3 +425,38 @@ describe("the contract is documented for every kind", () => {
     }
   });
 });
+
+import { defaultProbeTargets, isLoopback } from "@/lib/monitoring/probes";
+
+describe("loopback probe classification", () => {
+  it("recognises every loopback spelling", () => {
+    expect(isLoopback("http://localhost:11434/v1")).toBe(true);
+    expect(isLoopback("http://127.0.0.1:11434/v1")).toBe(true);
+    expect(isLoopback("http://[::1]:11434/v1")).toBe(true);
+    expect(isLoopback("http://LOCALHOST:11434/v1")).toBe(true);
+  });
+
+  it("does not classify a real host as loopback", () => {
+    expect(isLoopback("https://api.openai.com/v1")).toBe(false);
+    expect(isLoopback("https://generativelanguage.googleapis.com")).toBe(false);
+  });
+
+  it("returns false for an unparseable URL instead of throwing", () => {
+    expect(isLoopback("not a url")).toBe(false);
+    expect(isLoopback("")).toBe(false);
+  });
+
+  it("flags exactly the Ollama target in the default suite", () => {
+    const targets = defaultProbeTargets();
+    const loopbacks = targets.filter((t) => t.loopback);
+    expect(loopbacks.map((t) => t.target)).toEqual(["provider ollama"]);
+  });
+
+  it("keeps the loopback target in the suite rather than dropping it", () => {
+    // The probe still runs and still reports the real result; the flag only lets
+    // the UI explain it. Silently removing the target would hide a genuine
+    // misconfiguration on a machine that SHOULD have a local daemon.
+    const targets = defaultProbeTargets();
+    expect(targets.some((t) => t.target === "provider ollama")).toBe(true);
+  });
+});

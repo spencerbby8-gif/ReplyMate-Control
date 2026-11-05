@@ -156,6 +156,13 @@ export default async function MonitoringPage() {
               <li key={target.target} className="rounded-md border px-3 py-2">
                 <p className="font-mono text-[11px]">{target.target}</p>
                 <p className="mt-0.5 break-all text-[10px] text-muted-foreground">{target.url}</p>
+                {target.loopback ? (
+                  <p className="mt-1 text-[10px] leading-relaxed text-warning">
+                    Loopback target. A server has no local daemon here, so this probe reports{" "}
+                    <span className="font-mono">down</span> as a structural fact — not an incident,
+                    and not something an operator can fix from this console.
+                  </p>
+                ) : null}
               </li>
             ))}
           </ul>

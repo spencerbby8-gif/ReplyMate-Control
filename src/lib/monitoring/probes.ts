@@ -87,8 +87,34 @@ async function probeDatabase(): Promise<ProbeResult> {
   }
 }
 
-export function defaultProbeTargets(): Array<{ target: string; url: string; kind: ProbeResult["kind"] }> {
-  const targets: Array<{ target: string; url: string; kind: ProbeResult["kind"] }> = [
+/**
+ * True for a URL pointing at this host.
+ *
+ * Ollama's default base URL is `http://localhost:11434/v1`. On a server there is
+ * no local Ollama daemon, so that probe will always fail — and reporting it as
+ * `down` reads like an incident when it is a structural fact of the environment.
+ * The probe still runs and still reports the real result; the flag only lets the
+ * UI say why, instead of implying an outage nobody can act on.
+ */
+export function isLoopback(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+export type ProbeTarget = {
+  target: string;
+  url: string;
+  kind: ProbeResult["kind"];
+  /** True when the URL points at this host; see isLoopback(). */
+  loopback?: boolean;
+};
+
+export function defaultProbeTargets(): ProbeTarget[] {
+  const targets: ProbeTarget[] = [
     {
       target: "supabase rest",
       url: env.NEXT_PUBLIC_SUPABASE_URL
@@ -116,6 +142,7 @@ export function defaultProbeTargets(): Array<{ target: string; url: string; kind
       target: `provider ${provider.key}`,
       url: provider.defaultBaseUrl,
       kind: "http",
+      loopback: isLoopback(provider.defaultBaseUrl),
     });
   }
   return targets;
