@@ -70,6 +70,14 @@ today exactly one thing: the single-use invitation URL.
 | `lib/monitoring/probes.ts` | Live unauthenticated reachability probes | env, catalog |
 | `lib/aiops/engine.ts` | Tool registry + deterministic/LLM engine | queries, privacy, env |
 | `lib/supabase/bridge.ts` | Allow-listed read-only bridge | privacy, env |
+| `lib/auth/identity.ts` | Identity strategy: local scrypt OR Supabase Auth. Fails closed, never falls back | env, crypto |
+| `lib/auth/csrf.ts` | Origin verification for state-changing requests | — |
+| `lib/auth/rate-limit.ts` | Database-backed per-source login throttle | db |
+| `lib/authz/escalation.ts` | Pure administrator-change policy | permissions |
+| `lib/ingest/allowlist.ts` | Closed telemetry schema + denied-key sweep + PII value screening | zod |
+| `lib/ingest/auth.ts` | Device bearer authentication, scoped and revocable | db, crypto |
+| `lib/config/versioning.ts` | Immutable revisions, published snapshots, client resolution | db |
+| `lib/queries/health.ts` | Structural self-checks, incl. "is this the production database?" | db |
 
 ---
 
@@ -130,6 +138,13 @@ authorization is an administrative decision that should not live in an IdP claim
 | `tests/audit-redaction.test.ts` | Secret-like keys and values are replaced; content fields are dropped; recursion, depth and size caps; diffs record only real changes |
 | `tests/catalog.test.ts` | The ten providers, their base URLs, dialects and capability bindings match the Android source; the output-cap rule is arithmetically correct |
 | `tests/integrations.test.ts` | The release-ledger parser handles the real format, including `❌ BROKEN` rows and malformed sha256 |
+| `tests/csrf.test.ts` | Safe-method exemption, `Sec-Fetch-Site` precedence over a forged Origin, host matching, malformed-Origin refusal, non-browser clients |
+| `tests/rate-limit.test.ts` | Distinct-target limit trips before the volume limit; digests are stable, normalised and never contain the raw IP or address |
+| `tests/session-policy.test.ts` | Expired lock resets the counter; token digest is keyed, not plain SHA-256 |
+| `tests/identity.test.ts` | Strategy follows config; Supabase mode fails **closed** rather than falling back to local hashes |
+| `tests/escalation.test.ts` | 34-case administrator-change matrix: self-protection, rank, owner-only rules, grant rules |
+| `tests/ingest-allowlist.test.ts` | 91 cases attacking the validator: unknown kinds, smuggled content keys at depth, PII in allowed fields, the `syncEnabled=true` refusal, timestamp clamping, batch limits |
+| `tests/config-versioning.test.ts` | Semver comparison — including `1.5.10 > 1.5.9`, which a string sort gets wrong |
 
 These are unit tests over pure logic — no network, no database, no mocks of a service that does not
 exist. Integration behaviour (a real sign-in, a real probe) is exercised through the running app.
