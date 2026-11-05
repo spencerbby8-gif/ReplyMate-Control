@@ -15,6 +15,12 @@ import { adminRole, type AdminRole } from "@/db/schema";
  * owner-only. Everything else is shared.
  */
 const OWNER_ONLY: ReadonlySet<Capability> = new Set<Capability>([
+  // Provider master keys control platform spend and are written to the
+  // production project's secret store. plans:manage changes what paying users
+  // are entitled to. Both are owner-only by requirement, and both additionally
+  // require a verified MFA session (enforced in the vault executor).
+  "vault:manage",
+  "plans:manage",
   "users:manage",
   "security:manage",
 ]);

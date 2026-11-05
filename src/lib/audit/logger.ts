@@ -53,6 +53,10 @@ export const auditActions = {
   // ops
   monitorProbeRun: "monitor.probe.run",
   aiopsInvoked: "aiops.tool.invoked",
+  vaultKeySet: "vault.key.set",
+  vaultKeyRotated: "vault.key.rotated",
+  vaultKeyDisabled: "vault.key.disabled",
+  vaultPolicySet: "vault.policy.set",
   // guardrails
   accessDenied: "authz.denied",
   privacyViolation: "privacy.violation",

@@ -6,6 +6,7 @@ import {
   jsonb,
   pgTable,
   text,
+  type AnyPgColumn,
   timestamp,
   uniqueIndex,
   uuid,
@@ -664,3 +665,98 @@ export const ctlKeyState = pgTable("ctl_key_state", {
   observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
   note: text("note"),
 });
+
+// ---------------------------------------------------------------------------
+// Provider master-key vault — METADATA ONLY
+//
+// There is deliberately NO column in this table that can hold a key value: no
+// `value`, no `ciphertext`, no `encrypted_key`, no `secret`. The authoritative
+// store is Supabase Edge Function Secrets, written through the Management API
+// (lib/supabase/management.ts). This table records only what an operator needs
+// in order to manage keys without ever being able to read one back:
+//
+//   which provider · which slot · the secret NAME · a non-reversible fingerprint
+//   · status · who set it · when · rotation state
+//
+// The fingerprint is an HMAC of the value truncated to 16 hex characters. It
+// answers "did this change?" and "is this the same key as before?" without being
+// reversible, so a database dump yields nothing usable and no rainbow table
+// applies. `scripts/check-secrets.mjs` and the audit-redaction layer both still
+// run, but the strongest guarantee is that there is nowhere to put a secret.
+// ---------------------------------------------------------------------------
+
+export const providerKeySlot = ["primary", "next"] as const;
+export type ProviderKeySlot = (typeof providerKeySlot)[number];
+
+export const providerKeyStatus = ["active", "rotating", "disabled", "failed"] as const;
+export type ProviderKeyStatus = (typeof providerKeyStatus)[number];
+
+export const ctlProviderKey = pgTable(
+  "ctl_provider_key",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Gateway provider key, e.g. `gemini`. Must be one the gateway proxies. */
+    providerKey: text("provider_key").notNull(),
+    /** `primary` = {PROVIDER}_MASTER_KEY, `next` = {PROVIDER}_MASTER_KEY_NEXT. */
+    slot: text("slot", { enum: providerKeySlot }).notNull(),
+    /** The Edge Function secret NAME. Safe to display; it is not a secret. */
+    secretName: text("secret_name").notNull(),
+    /** Non-reversible HMAC fingerprint of the value. Change detection only. */
+    valueFingerprint: text("value_fingerprint").notNull(),
+    /** Length in characters — enough to spot a truncated paste, not to guess. */
+    valueLength: integer("value_length").notNull(),
+    status: text("status", { enum: providerKeyStatus }).notNull().default("active"),
+    /** Digest reported by the Management API, for drift detection. */
+    remoteDigest: text("remote_digest"),
+    /** Last time a live provider probe succeeded. Null means never probed. */
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
+    lastVerifiedOutcome: text("last_verified_outcome", {
+      enum: ["ok", "auth_failed", "quota", "rate_limited", "error", "unavailable"],
+    }),
+    /** Free-text operational note. Redaction still applies; never put a key here. */
+    note: text("note"),
+    setBy: uuid("set_by").references(() => ctlAdmin.id, { onDelete: "set null" }),
+    // Self-reference: which prior key row this one replaced during a rotation.
+    // AnyPgColumn is required because a plain `() => ctlProviderKey.id` makes the
+    // table's own type depend on itself and TypeScript cannot infer it.
+    rotatedFrom: uuid("rotated_from").references((): AnyPgColumn => ctlProviderKey.id, {
+      onDelete: "set null",
+    }),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ctl_provider_key_slot_uidx").on(t.providerKey, t.slot, t.valueFingerprint),
+    index("ctl_provider_key_provider_idx").on(t.providerKey),
+  ],
+);
+
+/**
+ * Per-provider platform-AI policy.
+ *
+ * This is what makes BYOK and platform AI separate modes rather than a fallback
+ * chain: a provider is either enabled for platform use or it is not, and the
+ * gateway is only ever invoked for a user whose plan grants `ai.platform`.
+ */
+export const ctlProviderPolicy = pgTable(
+  "ctl_provider_policy",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerKey: text("provider_key").notNull(),
+    /** Platform may use its own master key for this provider. */
+    platformEnabled: boolean("platform_enabled").notNull().default(false),
+    /** Users may still bring their own key for this provider. Always true. */
+    byokAllowed: boolean("byok_allowed").notNull().default(true),
+    /** Hard spend ceiling in micro-USD per UTC day, 0 = no platform spend. */
+    dailySpendCapMicroUsd: integer("daily_spend_cap_micro_usd").notNull().default(0),
+    reason: text("reason"),
+    updatedBy: uuid("updated_by").references(() => ctlAdmin.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("ctl_provider_policy_key_uidx").on(t.providerKey)],
+);
+
+export type CtlProviderKey = typeof ctlProviderKey.$inferSelect;
+export type CtlProviderPolicy = typeof ctlProviderPolicy.$inferSelect;

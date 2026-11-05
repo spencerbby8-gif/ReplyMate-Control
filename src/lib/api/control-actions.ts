@@ -34,6 +34,13 @@ import { revokeAllSessionsForAdmin, revokeSessionById } from "@/lib/auth/session
 import { authorizeAdminChange } from "@/lib/authz/escalation";
 import { identityProvider } from "@/lib/auth/identity";
 import { observeKeyState } from "@/lib/auth/key-state";
+import {
+  disableProviderKey,
+  promoteRotation,
+  setProviderKey,
+  setProviderPolicy,
+  stageRotation,
+} from "@/lib/vault/provider-keys";
 import { PrivacyViolation } from "@/lib/privacy/guard";
 import { fetchReleaseLedger, syncReleases } from "@/lib/integrations/github";
 import { runProbeSuite } from "@/lib/monitoring/probes";
@@ -250,6 +257,62 @@ export const controlActionSchema = z.union([
     operation: z.literal("run"),
     values: z.object({ prompt: z.string().min(2).max(2000), sessionId: uuid.optional() }),
   }),
+
+  // ---- provider master-key vault ---------------------------------------
+  // `value` is accepted here and forwarded to the Supabase Management API in the
+  // same request. It is never persisted, never returned, and never written to the
+  // audit log: the audit detail records a fingerprint and a length instead.
+  z.object({
+    resource: z.literal("vault"),
+    operation: z.literal("setKey"),
+    values: z.object({
+      providerKey: z.string().min(2).max(32),
+      slot: z.enum(["primary", "next"]),
+      value: z.string().min(8).max(512),
+      note: z.string().max(300).nullish(),
+      /** Operator confirmation echo. Destructive writes require it. */
+      confirmProvider: z.string().min(2).max(32),
+    }),
+  }),
+  z.object({
+    resource: z.literal("vault"),
+    operation: z.literal("stageRotation"),
+    values: z.object({
+      providerKey: z.string().min(2).max(32),
+      value: z.string().min(8).max(512),
+      note: z.string().max(300).nullish(),
+      confirmProvider: z.string().min(2).max(32),
+    }),
+  }),
+  z.object({
+    resource: z.literal("vault"),
+    operation: z.literal("promoteRotation"),
+    values: z.object({
+      providerKey: z.string().min(2).max(32),
+      value: z.string().min(8).max(512),
+      confirmProvider: z.string().min(2).max(32),
+    }),
+  }),
+  z.object({
+    resource: z.literal("vault"),
+    operation: z.literal("disableKey"),
+    values: z.object({
+      providerKey: z.string().min(2).max(32),
+      slot: z.enum(["primary", "next"]),
+      confirmProvider: z.string().min(2).max(32),
+    }),
+  }),
+  z.object({
+    resource: z.literal("vault"),
+    operation: z.literal("setPolicy"),
+    values: z.object({
+      providerKey: z.string().min(2).max(32),
+      platformEnabled: z.boolean(),
+      byokAllowed: z.boolean(),
+      dailySpendCapMicroUsd: z.number().int().min(0).max(1_000_000_000),
+      reason: z.string().max(300).nullish(),
+    }),
+  }),
 ]);
 
 export type ControlAction = z.infer<typeof controlActionSchema>;
@@ -324,6 +387,11 @@ const CAPABILITY: Record<string, Capability> = {
   "ticket:update": "support:manage",
   "probe:run": "monitoring:run",
   "aiops:run": "aiops:use",
+  "vault:setKey": "vault:manage",
+  "vault:stageRotation": "vault:manage",
+  "vault:promoteRotation": "vault:manage",
+  "vault:disableKey": "vault:manage",
+  "vault:setPolicy": "vault:manage",
 };
 
 export function capabilityFor(resource: string, operation: string): Capability {
@@ -336,6 +404,21 @@ export function capabilityFor(resource: string, operation: string): Capability {
 export function isKnownAction(resource: unknown, operation: unknown): boolean {
   if (typeof resource !== "string" || typeof operation !== "string") return false;
   return Object.hasOwn(CAPABILITY, `${resource}:${operation}`);
+}
+
+/**
+ * Destructive vault writes require the operator to type the provider key back.
+ *
+ * A modal "Are you sure?" is not a control: it is one keystroke from muscle
+ * memory. Echoing the identifier makes the operator read what they are about to
+ * change, which is the only confirmation that catches a wrong-provider paste.
+ */
+function assertConfirmation(confirmProvider: string, providerKey: string): void {
+  if (confirmProvider.trim().toLowerCase() !== providerKey.trim().toLowerCase()) {
+    throw new ConflictError(
+      `Confirmation mismatch: you typed "${confirmProvider}" but this action targets "${providerKey}". Type the provider key exactly to proceed.`,
+    );
+  }
 }
 
 export function knownActions(): string[] {
@@ -365,6 +448,11 @@ const ACTION_FOR: Record<string, AuditAction> = {
   "ticket:update": auditActions.ticketUpdated,
   "probe:run": auditActions.monitorProbeRun,
   "aiops:run": auditActions.aiopsInvoked,
+  "vault:setKey": auditActions.vaultKeySet,
+  "vault:stageRotation": auditActions.vaultKeyRotated,
+  "vault:promoteRotation": auditActions.vaultKeyRotated,
+  "vault:disableKey": auditActions.vaultKeyDisabled,
+  "vault:setPolicy": auditActions.vaultPolicySet,
 };
 
 export type Actor = {
@@ -374,7 +462,20 @@ export type Actor = {
   ip: string | null;
   userAgent: string | null;
   requestId: string;
+  /** True only when this session completed a second-factor challenge. */
+  mfaVerified: boolean;
 };
+
+/**
+ * Resources that require a session which actually completed an MFA challenge.
+ *
+ * `requireMfa: true` on the session guard means "MFA-verified if the account has
+ * a factor enrolled". That is the right default, but it is not enough for
+ * operations that write production provider credentials: an account that never
+ * enrolled would pass. These resources demand a verified factor regardless, and
+ * the refusal tells the operator exactly what to do.
+ */
+export const MFA_VERIFIED_REQUIRED: ReadonlySet<string> = new Set(["vault"]);
 
 export type ExecutionResult = {
   entity: string;
@@ -1144,6 +1245,82 @@ export async function executeControlAction(
           honest: outcome.honest,
         },
       };
+    }
+
+    // ------------------------------------------------------------------ vault
+    //
+    // Every case here forwards the value straight to the Supabase Management API
+    // and returns only a fingerprint and a length. `action.values.value` must
+    // never appear in `detail`, because `detail` is written to ctl_audit_log.
+    // `tests/provider-vault.test.ts` asserts that structurally.
+    case "vault:setKey": {
+      const action = narrowAction(input, "vault", "setKey");
+      assertConfirmation(action.values.confirmProvider, action.values.providerKey);
+      const result = await setProviderKey({
+        providerKey: action.values.providerKey,
+        slot: action.values.slot,
+        value: action.values.value,
+        note: action.values.note ?? null,
+        actorAdminId: actor.adminId,
+      });
+      if (!result.ok) throw new UpstreamError(result.reason);
+      return {
+        entity: "provider_key",
+        entityId: null,
+        detail: result.detail,
+        summary: result.summary,
+      };
+    }
+
+    case "vault:stageRotation": {
+      const action = narrowAction(input, "vault", "stageRotation");
+      assertConfirmation(action.values.confirmProvider, action.values.providerKey);
+      const result = await stageRotation({
+        providerKey: action.values.providerKey,
+        value: action.values.value,
+        note: action.values.note ?? null,
+        actorAdminId: actor.adminId,
+      });
+      if (!result.ok) throw new UpstreamError(result.reason);
+      return { entity: "provider_key", entityId: null, detail: result.detail, summary: result.summary };
+    }
+
+    case "vault:promoteRotation": {
+      const action = narrowAction(input, "vault", "promoteRotation");
+      assertConfirmation(action.values.confirmProvider, action.values.providerKey);
+      const result = await promoteRotation({
+        providerKey: action.values.providerKey,
+        value: action.values.value,
+        actorAdminId: actor.adminId,
+      });
+      if (!result.ok) throw new UpstreamError(result.reason);
+      return { entity: "provider_key", entityId: null, detail: result.detail, summary: result.summary };
+    }
+
+    case "vault:disableKey": {
+      const action = narrowAction(input, "vault", "disableKey");
+      assertConfirmation(action.values.confirmProvider, action.values.providerKey);
+      const result = await disableProviderKey({
+        providerKey: action.values.providerKey,
+        slot: action.values.slot,
+        actorAdminId: actor.adminId,
+      });
+      if (!result.ok) throw new UpstreamError(result.reason);
+      return { entity: "provider_key", entityId: null, detail: result.detail, summary: result.summary };
+    }
+
+    case "vault:setPolicy": {
+      const action = narrowAction(input, "vault", "setPolicy");
+      const result = await setProviderPolicy({
+        providerKey: action.values.providerKey,
+        platformEnabled: action.values.platformEnabled,
+        byokAllowed: action.values.byokAllowed,
+        dailySpendCapMicroUsd: action.values.dailySpendCapMicroUsd,
+        reason: action.values.reason ?? null,
+        actorAdminId: actor.adminId,
+      });
+      if (!result.ok) throw new ConflictError(result.reason);
+      return { entity: "provider_policy", entityId: null, detail: result.detail, summary: result.summary };
     }
 
     default:

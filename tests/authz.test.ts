@@ -124,10 +124,14 @@ describe("navigation registry", () => {
   });
 
   it("keeps icon names resolvable by the sidebar", () => {
+    // This list must stay in sync with the ICONS map in
+    // components/layout/sidebar.tsx. It exists so a nav entry cannot reference an
+    // icon the sidebar silently drops — which renders as a missing glyph rather
+    // than an error, so nothing else would catch it.
     const known = new Set([
       "LayoutDashboard", "Activity", "Users", "ShieldCheck", "ScrollText", "Cpu",
-      "GitBranch", "BarChart3", "Sparkles", "Flag", "Package", "Smartphone",
-      "CreditCard", "LifeBuoy", "SlidersHorizontal", "Lock",
+      "GitBranch", "KeyRound", "BarChart3", "Sparkles", "Flag", "Package",
+      "Smartphone", "CreditCard", "LifeBuoy", "SlidersHorizontal", "Lock",
     ]);
     for (const item of navItems) {
       expect(known.has(item.icon), `unmapped icon ${item.icon}`).toBe(true);

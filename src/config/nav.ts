@@ -29,6 +29,9 @@ export const capabilities = [
   "devices:manage",
   "providers:view",
   "providers:manage",
+  "vault:view",
+  "vault:manage",
+  "plans:manage",
   "routing:view",
   "routing:manage",
   "usage:view",
@@ -112,6 +115,15 @@ export const navGroups: NavGroup[] = [
   {
     label: "Intelligence",
     items: [
+      {
+        title: "AI key vault",
+        href: "/ai-keys",
+        icon: "KeyRound",
+        description:
+          "Platform provider master keys, managed in Supabase Edge Function Secrets. Values are never stored or returned here.",
+        roles: MANAGE,
+        capability: "vault:view",
+      },
       {
         title: "AI providers",
         href: "/ai-providers",

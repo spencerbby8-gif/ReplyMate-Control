@@ -6,6 +6,7 @@ import {
   flattenZodError,
   httpStatusFor,
   isKnownAction,
+  MFA_VERIFIED_REQUIRED,
   knownActions,
 } from "@/lib/api/control-actions";
 import { auditActions, recordAudit } from "@/lib/audit/logger";
@@ -75,7 +76,46 @@ export async function POST(request: Request) {
     ip,
     userAgent: agent,
     requestId,
+    mfaVerified: session.session.mfaVerified,
   };
+
+  // Some resources require a session that ACTUALLY completed a second-factor
+  // challenge. Two conditions, and both matter:
+  //
+  //   session.mfaVerified  — a challenge was passed on this session
+  //   admin.mfaEnrolledAt  — the account has a factor at all
+  //
+  // Checking only the first is not enough, and live testing proved it: a session
+  // is created with mfaVerified=true when the account has no factor enrolled
+  // (nothing to verify), so a vault write sailed straight through to the
+  // Management API. Requiring an enrolled factor closes that, which is what
+  // "owner authorization, MFA and confirmation for destructive actions" means.
+  const needsVerifiedMfa = MFA_VERIFIED_REQUIRED.has(action.resource);
+  const mfaSatisfied = session.session.mfaVerified && session.admin.mfaEnrolledAt !== null;
+  if (needsVerifiedMfa && !mfaSatisfied) {
+    const reason = session.admin.mfaEnrolledAt === null ? "mfa_not_enrolled" : "mfa_not_verified";
+    await recordAudit({
+      action: auditActions.accessDenied,
+      actorAdminId: actor.adminId,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      entity: action.resource,
+      entityId: action.operation,
+      outcome: "denied",
+      requestId,
+      ip,
+      userAgent: agent,
+      detail: { reason, resource: action.resource, operation: action.operation },
+    });
+    return jsonError(
+      reason === "mfa_not_enrolled"
+        ? "This action requires multi-factor authentication, and no TOTP factor is enrolled on this account. Enrol one from Security, then sign in again."
+        : "This action requires a session that has completed a multi-factor challenge. Sign in again and pass the TOTP prompt.",
+      403,
+      "mfa_required",
+      requestId,
+    );
+  }
 
   try {
     const result = await executeControlAction(action, actor);
