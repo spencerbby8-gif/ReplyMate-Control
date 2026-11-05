@@ -26,6 +26,7 @@ export const capabilities = [
   "users:view",
   "users:manage",
   "devices:view",
+  "devices:manage",
   "providers:view",
   "providers:manage",
   "routing:view",

@@ -331,11 +331,74 @@ export const ctlDevice = pgTable(
       .default("unknown"),
     /** Explicit user consent is a precondition for any row existing here. */
     consentRecordedAt: timestamp("consent_recorded_at", { withTimezone: true }).notNull(),
+    /** Consent is revocable; revocation stops ingestion immediately. */
+    consentRevokedAt: timestamp("consent_revoked_at", { withTimezone: true }),
+    status: text("status", { enum: ["active", "revoked", "expired"] }).notNull().default("active"),
+    registeredBy: uuid("registered_by").references(() => ctlAdmin.id, { onDelete: "set null" }),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    eventCount: integer("event_count").notNull().default(0),
     notes: text("notes"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("ctl_device_seen_idx").on(t.lastSeenAt)],
+  (t) => [index("ctl_device_seen_idx").on(t.lastSeenAt), index("ctl_device_status_idx").on(t.status)],
+);
+
+/**
+ * Device API credentials.
+ *
+ * The bearer key is generated once and only its digest is stored, exactly like
+ * sessions and invitations. A key is scoped to ONE device and can be revoked
+ * without touching any other.
+ */
+export const ctlDeviceToken = pgTable(
+  "ctl_device_token",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => ctlDevice.id, { onDelete: "cascade" }),
+    tokenDigest: text("token_digest").notNull(),
+    label: text("label"),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ctl_device_token_digest_uidx").on(t.tokenDigest),
+    index("ctl_device_token_device_idx").on(t.deviceId),
+  ],
+);
+
+/**
+ * Opt-in operational telemetry.
+ *
+ * Every row has passed `src/lib/ingest/allowlist.ts`, which is a strict
+ * per-kind schema: unknown kinds are rejected, unknown fields are rejected,
+ * denied keys are rejected recursively at any depth, and string values are
+ * screened for phone-number and email shapes. There is no free-form payload
+ * column, so a message body has nowhere to go even if a client tried.
+ */
+export const ctlDeviceEvent = pgTable(
+  "ctl_device_event",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => ctlDevice.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    appVersion: text("app_version"),
+    androidApiLevel: integer("android_api_level"),
+    /** Allow-listed fields only. Validated before insert; never merged raw. */
+    payload: jsonb("payload").notNull(),
+    /** Client-reported occurrence time, clamped to a sane window server-side. */
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("ctl_device_event_device_ts_idx").on(t.deviceId, t.occurredAt),
+    index("ctl_device_event_kind_idx").on(t.kind, t.occurredAt),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -389,6 +452,59 @@ export const ctlSubscription = pgTable(
 // ---------------------------------------------------------------------------
 // Remote configuration
 // ---------------------------------------------------------------------------
+
+/**
+ * Versioned configuration.
+ *
+ * `ctl_config_item.value` is the DRAFT. A client never reads it directly: it
+ * reads a published `ctl_config_release`, which pins an immutable set of
+ * revisions. That makes "what did version 1.5.9 receive at 14:02?" answerable,
+ * and makes a bad edit recoverable by republishing the previous release instead
+ * of retyping nineteen values.
+ */
+export const ctlConfigRevision = pgTable(
+  "ctl_config_revision",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    configItemId: uuid("config_item_id")
+      .notNull()
+      .references(() => ctlConfigItem.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    version: integer("version").notNull(),
+    valueType: text("value_type", { enum: ["string", "number", "boolean", "json"] })
+      .notNull()
+      .default("string"),
+    value: jsonb("value"),
+    changeNote: text("change_note"),
+    changedBy: uuid("changed_by").references(() => ctlAdmin.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ctl_config_revision_key_version_uidx").on(t.key, t.version),
+    index("ctl_config_revision_item_idx").on(t.configItemId),
+  ],
+);
+
+export const configReleaseStatus = ["draft", "published", "superseded"] as const;
+export type ConfigReleaseStatus = (typeof configReleaseStatus)[number];
+
+export const ctlConfigRelease = pgTable(
+  "ctl_config_release",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    version: integer("version").notNull(),
+    status: text("status", { enum: configReleaseStatus }).notNull().default("draft"),
+    /** Immutable snapshot: { key: { version, value } }. */
+    snapshot: jsonb("snapshot").notNull(),
+    /** Minimum client version this release applies to, or null for all. */
+    minAppVersion: text("min_app_version"),
+    changeNote: text("change_note"),
+    publishedBy: uuid("published_by").references(() => ctlAdmin.id, { onDelete: "set null" }),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("ctl_config_release_version_uidx").on(t.version)],
+);
 
 export const ctlConfigItem = pgTable(
   "ctl_config_item",

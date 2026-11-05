@@ -8,7 +8,8 @@ import {
   isKnownAction,
   knownActions,
 } from "@/lib/api/control-actions";
-import { recordAudit } from "@/lib/audit/logger";
+import { auditActions, recordAudit } from "@/lib/audit/logger";
+import { csrfFailureResponse } from "@/lib/auth/csrf";
 import { apiRequire } from "@/lib/authz/guard";
 import { clientIp, jsonError, jsonOk, userAgent } from "@/lib/http";
 import { isPrivacyViolation } from "@/lib/privacy/guard";
@@ -25,6 +26,23 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   const ip = clientIp(request);
   const agent = userAgent(request);
+
+  // CSRF is the FIRST gate, before the body is even parsed. Checking it after
+  // validation would let a cross-site request probe which actions exist and
+  // which payloads are well-formed using the victim's cookie.
+  const csrfFailure = csrfFailureResponse(request);
+  if (csrfFailure) {
+    await recordAudit({
+      action: auditActions.csrfRejected,
+      entity: "csrf",
+      outcome: "denied",
+      ip,
+      userAgent: agent,
+      detail: { path: "/api/control" },
+    });
+    return csrfFailure;
+  }
+
   const raw = await request.json().catch(() => null);
 
   // Reject an unknown action pair with a precise message. Otherwise a union

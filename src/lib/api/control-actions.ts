@@ -1,10 +1,13 @@
-import { and, eq } from "drizzle-orm";
 import { z } from "zod";
+import { and, eq, isNull } from "drizzle-orm";
 import { db } from "@/db";
+import { draftDrift, publishRelease, recordRevision } from "@/lib/config/versioning";
 import {
   ctlAdmin,
   ctlAiProvider,
   ctlConfigItem,
+  ctlDevice,
+  ctlDeviceToken,
   ctlFeatureFlag,
   ctlInvite,
   ctlModelRoute,
@@ -177,7 +180,15 @@ export const controlActionSchema = z.union([
   z.object({
     resource: z.literal("config"),
     operation: z.literal("update"),
-    values: z.object({ id: uuid, value: z.unknown() }),
+    values: z.object({ id: uuid, value: z.unknown(), changeNote: z.string().max(500).nullish() }),
+  }),
+  z.object({
+    resource: z.literal("config"),
+    operation: z.literal("publish"),
+    values: z.object({
+      changeNote: z.string().max(500).nullish(),
+      minAppVersion: z.string().max(32).nullish(),
+    }),
   }),
 
   // ---- support -----------------------------------------------------------
@@ -203,6 +214,24 @@ export const controlActionSchema = z.union([
   }),
 
   // ---- monitoring --------------------------------------------------------
+  z.object({
+    resource: z.literal("device"),
+    operation: z.literal("register"),
+    values: z.object({
+      label: z.string().min(1).max(80),
+      appVersion: z.string().max(24).nullish(),
+      androidApiLevel: z.number().int().min(1).max(99).nullish(),
+      deviceModel: z.string().max(64).nullish(),
+      consentRecordedAt: z.string().datetime(),
+      notes: z.string().max(500).nullish(),
+      expiresInDays: z.number().int().min(1).max(365).default(90),
+    }),
+  }),
+  z.object({
+    resource: z.literal("device"),
+    operation: z.literal("revoke"),
+    values: z.object({ id: uuid, reason: z.string().max(200).nullish() }),
+  }),
   z.object({
     resource: z.literal("probe"),
     operation: z.literal("run"),
@@ -281,6 +310,9 @@ const CAPABILITY: Record<string, Capability> = {
   "release:syncFromSource": "releases:manage",
   "release:update": "releases:manage",
   "config:update": "config:manage",
+  "config:publish": "config:manage",
+  "device:register": "devices:manage",
+  "device:revoke": "devices:manage",
   "ticket:create": "support:manage",
   "ticket:update": "support:manage",
   "probe:run": "monitoring:run",
@@ -318,6 +350,9 @@ const ACTION_FOR: Record<string, AuditAction> = {
   "release:syncFromSource": auditActions.releaseUpdated,
   "release:update": auditActions.releaseUpdated,
   "config:update": auditActions.configUpdated,
+  "config:publish": auditActions.configPublished,
+  "device:register": auditActions.deviceRegistered,
+  "device:revoke": auditActions.deviceRevoked,
   "ticket:create": auditActions.ticketCreated,
   "ticket:update": auditActions.ticketUpdated,
   "probe:run": auditActions.monitorProbeRun,
@@ -835,11 +870,124 @@ export async function executeControlAction(
         .set({ value: coerced, updatedBy: actor.adminId, updatedAt: new Date() })
         .where(eq(ctlConfigItem.id, existing.id))
         .returning();
+
+      // The draft changed, so an immutable revision is appended. Clients keep
+      // receiving the last PUBLISHED release until someone publishes.
+      const revision = await recordRevision({
+        configItemId: updated.id,
+        key: updated.key,
+        valueType: updated.valueType as "string" | "number" | "boolean" | "json",
+        value: coerced,
+        changeNote: action.values.changeNote ?? null,
+        changedBy: actor.adminId,
+      });
+
       return {
         entity: "config",
         entityId: updated.id,
-        detail: { key: updated.key, before: { value: existing.value }, after: { value: updated.value } },
-        summary: `${updated.key} updated.`,
+        detail: {
+          key: updated.key,
+          revision: revision.version,
+          before: { value: existing.value },
+          after: { value: updated.value },
+        },
+        summary: `${updated.key} updated to revision ${revision.version} (draft — not yet published to clients).`,
+      };
+    }
+
+    case "config:publish": {
+
+      const action = narrowAction(input, "config", "publish");
+      const drift = await draftDrift();
+      const release = await publishRelease({
+        publishedBy: actor.adminId,
+        changeNote: action.values.changeNote ?? null,
+        minAppVersion: action.values.minAppVersion ?? null,
+      });
+      return {
+        entity: "config_release",
+        entityId: release.releaseId,
+        detail: {
+          version: release.version,
+          keys: release.keys,
+          excludedSensitive: release.excluded,
+          previouslyUnpublished: drift.draftAhead,
+          minAppVersion: action.values.minAppVersion ?? null,
+        },
+        summary: `Published configuration release v${release.version} (${release.keys} keys). ${
+          release.excluded.length > 0 ? `${release.excluded.length} sensitive key(s) excluded from delivery.` : ""
+        }`,
+      };
+    }
+
+    // ----------------------------------------------------------------- devices
+    case "device:register": {
+      const action = narrowAction(input, "device", "register");
+      const values = action.values;
+      const consent = new Date(values.consentRecordedAt);
+      if (Number.isNaN(consent.getTime()) || consent.getTime() > Date.now() + 60_000) {
+        throw new ConflictError("consentRecordedAt must be a real timestamp that is not in the future.");
+      }
+
+      const [device] = await db
+        .insert(ctlDevice)
+        .values({
+          label: values.label,
+          appVersion: values.appVersion ?? null,
+          androidApiLevel: values.androidApiLevel ?? null,
+          deviceModel: values.deviceModel ?? null,
+          consentRecordedAt: consent,
+          status: "active",
+          registeredBy: actor.adminId,
+          notes: values.notes ?? null,
+        })
+        .returning();
+
+      // Bearer credential, digest-only at rest, scoped to this one device.
+      const token = generateToken();
+      const expiresAt = new Date(Date.now() + values.expiresInDays * 86_400_000);
+      await db.insert(ctlDeviceToken).values({
+        deviceId: device.id,
+        tokenDigest: digestToken(token),
+        label: `${values.label} ingest key`,
+        expiresAt,
+      });
+
+      return {
+        entity: "device",
+        entityId: device.id,
+        detail: {
+          label: device.label,
+          appVersion: device.appVersion,
+          consentRecordedAt: device.consentRecordedAt.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+        },
+        responseOnly: { ingestKey: token, deviceId: device.id },
+        summary: `Device "${device.label}" registered. The ingest key is shown once and stored only as a digest.`,
+      };
+    }
+
+    case "device:revoke": {
+
+      const action = narrowAction(input, "device", "revoke");
+      const [device] = await db.select().from(ctlDevice).where(eq(ctlDevice.id, action.values.id));
+      if (!device) throw new NotFoundError("Device not found.");
+
+      await db
+        .update(ctlDeviceToken)
+        .set({ revokedAt: new Date() })
+        .where(and(eq(ctlDeviceToken.deviceId, device.id), isNull(ctlDeviceToken.revokedAt)));
+      const [updated] = await db
+        .update(ctlDevice)
+        .set({ status: "revoked", consentRevokedAt: new Date(), notes: action.values.reason ?? device.notes })
+        .where(eq(ctlDevice.id, device.id))
+        .returning();
+
+      return {
+        entity: "device",
+        entityId: updated.id,
+        detail: { label: updated.label, reason: action.values.reason ?? null },
+        summary: `Device "${updated.label}" revoked; its ingest keys no longer authenticate and further telemetry is refused.`,
       };
     }
 

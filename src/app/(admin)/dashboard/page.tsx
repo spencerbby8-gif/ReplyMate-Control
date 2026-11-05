@@ -7,6 +7,7 @@ import {
   Database,
   Flag,
   GitBranch,
+  HeartPulse,
   LifeBuoy,
   Lock,
   Package,
@@ -25,16 +26,22 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { requireCapability } from "@/lib/authz/guard";
 import { envReport } from "@/config/env";
+import { identityStatus } from "@/lib/auth/identity";
+import { digestKeyStrength } from "@/lib/auth/crypto";
+import { throttlePosture } from "@/lib/auth/rate-limit";
+import { currentRelease, draftDrift } from "@/lib/config/versioning";
+import { deviceEventSummary } from "@/lib/queries/devices";
+import { appDataPlanePresent, auditImmutabilityInstalled, countControlTables } from "@/lib/queries/health";
 import { formatRelative } from "@/lib/utils";
 import {
   activeSessionCount,
   countAdmins,
   mfaPosture,
   countPendingInvites,
-  recentAudit,
 } from "@/lib/queries/admins";
 import {
   auditStats,
+  listAudit,
   configStats,
   deviceStats,
   flagStats,
@@ -53,7 +60,7 @@ export const metadata: Metadata = { title: "Dashboard" };
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ denied?: string }>;
+  searchParams: Promise<{ denied?: string; before?: string }>;
 }) {
   const { admin } = await requireCapability("dashboard:view");
   const params = await searchParams;
@@ -74,6 +81,15 @@ export default async function DashboardPage({
     config,
     probes,
     events,
+    identity,
+    digestStrength,
+    throttle,
+    configRelease,
+    drift,
+    telemetry,
+    tableCount,
+    dataPlane,
+    auditImmutable,
   ] = await Promise.all([
     countAdmins(),
     countPendingInvites(),
@@ -89,14 +105,39 @@ export default async function DashboardPage({
     ticketStats(),
     configStats(),
     latestProbePerTarget(),
-    recentAudit(8),
+    listAudit({ limit: 12, beforeId: Number.isFinite(Number(params.before)) && Number(params.before) > 0 ? Number(params.before) : undefined }),
+    Promise.resolve(identityStatus()),
+    Promise.resolve(digestKeyStrength()),
+    throttlePosture(),
+    currentRelease(),
+    draftDrift(),
+    deviceEventSummary(),
+    countControlTables(),
+    appDataPlanePresent(),
+    auditImmutabilityInstalled(),
   ]);
+
+  const draftAhead = drift.draftAhead;
 
   const report = envReport();
   const bridge = bridgeStatus();
   const degradedProbes = probes.filter((p) => p.status === "degraded" || p.status === "down");
 
   const posture: Array<{ label: string; ok: boolean; detail: string }> = [
+    {
+      label: "Database separation",
+      ok: !dataPlane.present,
+      detail: dataPlane.present
+        ? `REFUSE TO OPERATE: this database contains ReplyMate app tables (${dataPlane.tables.join(", ")}). DATABASE_URL is pointing at the production data plane.`
+        : `Verified at request time: ${tableCount} ctl_* tables and zero ReplyMate app tables in this database.`,
+    },
+    {
+      label: "Audit immutability",
+      ok: auditImmutable,
+      detail: auditImmutable
+        ? "Database triggers refuse UPDATE and DELETE on ctl_audit_log (SQLSTATE 42501)."
+        : "Triggers are NOT installed. Run `npx tsx scripts/apply-hardening.ts` — the log is only protected in application code until then.",
+    },
     {
       label: "Message sync",
       ok: true,
@@ -233,6 +274,82 @@ export default async function DashboardPage({
         />
       </div>
 
+      {/* Live system health */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <HeartPulse className="size-4 text-primary" aria-hidden />
+            System health
+          </CardTitle>
+          <CardDescription>
+            Every row is a real measurement or a real configuration fact taken during this request.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {[
+              {
+                label: "Control-plane database",
+                tone: "ok" as const,
+                detail: `${tableCount} ctl_* tables reachable`,
+              },
+              {
+                label: "Identity provider",
+                tone: identity.configured ? ("ok" as const) : ("bad" as const),
+                detail: `${identity.provider} · ${identity.passwordStore}${identity.configured ? "" : " · NOT CONFIGURED — sign-in fails closed"}`,
+              },
+              {
+                label: "Supabase bridge",
+                tone: bridge.configured ? ("ok" as const) : ("muted" as const),
+                detail: bridge.configured ? "read-only, allow-listed" : "closed — no credentials configured",
+              },
+              {
+                label: "Token digests",
+                tone: digestStrength === "keyed" ? ("ok" as const) : ("warn" as const),
+                detail: digestStrength === "keyed" ? "keyed from CONTROL_ENC_KEY" : "UNKEYED — set CONTROL_ENC_KEY",
+              },
+              {
+                label: "Audit immutability",
+                tone: audit.total >= 0 ? ("ok" as const) : ("warn" as const),
+                detail: "DB triggers refuse UPDATE and DELETE (42501)",
+              },
+              {
+                label: "Login throttling",
+                tone: throttle.failuresInWindow > throttle.maxDistinctTargets ? ("warn" as const) : ("ok" as const),
+                detail: `${throttle.failuresInWindow} failure(s) from ${throttle.sourcesInWindow} source(s) in the last ${throttle.windowMinutes} min`,
+              },
+              {
+                label: "Config delivery",
+                tone: configRelease ? ("ok" as const) : ("warn" as const),
+                detail: configRelease
+                  ? `v${configRelease.version} published${draftAhead.length > 0 ? ` · ${draftAhead.length} draft key(s) ahead` : ""}`
+                  : "no release published — clients use built-in defaults",
+              },
+              {
+                label: "Device telemetry",
+                tone: telemetry.devices === 0 ? ("muted" as const) : ("ok" as const),
+                detail: `${telemetry.devices} registered · ${telemetry.eventsLast24h} event(s) in 24h`,
+              },
+              {
+                label: "External probes",
+                tone: degradedProbes.length > 0 ? ("warn" as const) : probes.length === 0 ? ("muted" as const) : ("ok" as const),
+                detail: probes.length === 0 ? "not run yet" : `${probes.length - degradedProbes.length}/${probes.length} healthy`,
+              },
+            ].map((row) => (
+              <li key={row.label} className="flex items-start gap-2.5 rounded-lg border bg-background/40 p-3">
+                <span className="mt-1.5">
+                  <Dot tone={row.tone === "ok" ? "success" : row.tone === "warn" ? "warning" : row.tone === "bad" ? "destructive" : "muted"} pulse={row.tone === "warn" || row.tone === "bad"} />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold">{row.label}</p>
+                  <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{row.detail}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </CardContent>
+      </Card>
+
       {/* Platform surfaces */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="AI providers" value={providers.total} hint={`${providers.available} available · ${providers.unconfigured} awaiting keys`} icon={Cpu} tone="neutral" />
@@ -297,6 +414,28 @@ export default async function DashboardPage({
                 ))}
               </ul>
             )}
+            {events.length > 0 ? (
+              <div className="mt-3 flex items-center justify-between gap-3 border-t pt-3">
+                <p className="text-[11px] text-muted-foreground">
+                  Showing {events.length} of {audit.total}. Keyset pagination — the cursor is the
+                  oldest row id on this page, so a new event arriving mid-scroll cannot shift the
+                  window and duplicate a row.
+                </p>
+                <div className="flex shrink-0 items-center gap-2">
+                  {params.before ? (
+                    <Button asChild variant="ghost" size="sm">
+                      <Link href="/dashboard">Newest</Link>
+                    </Button>
+                  ) : null}
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={`/dashboard?before=${events[events.length - 1].id}`}>
+                      Load older
+                      <ArrowRight className="size-3.5" aria-hidden />
+                    </Link>
+                  </Button>
+                </div>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 

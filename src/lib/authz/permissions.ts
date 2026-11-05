@@ -25,6 +25,7 @@ const matrix: Record<AdminRole, ReadonlySet<Capability>> = {
   operator: new Set<Capability>([
     "dashboard:view",
     "devices:view",
+    "devices:manage",
     "providers:view",
     "providers:manage",
     "routing:view",

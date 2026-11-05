@@ -124,6 +124,18 @@ regression test:
 
 ## 10. Known limitations (stated, not hidden)
 
+- **The source throttle trusts the IP the platform hands us.** `clientIp()` prefers
+  `X-Forwarded-For`. In this deployment the edge proxy strips client-supplied XFF and sets its own,
+  so an attacker cannot rotate the header to evade the per-source limit — verified: 24 probe logins
+  from three spoofed XFF values all collapsed onto ONE source digest and tripped the distinct-target
+  limit at 8. But a deployment behind a proxy that forwards client-supplied XFF verbatim would be
+  evadable. Configure `TRUST_PROXY` semantics at the edge, or front the app with a proxy that
+  overwrites XFF, before relying on this limit as your only enumeration defence.
+- **Throttle windows are rolling counts, not fixed buckets.** A source sitting just under the limit
+  can keep failing indefinitely as old rows age out. The per-account lockout still bounds damage to
+  any single account.
+
+
 - **Source throttle groups by IP + user-agent prefix.** A shared NAT is therefore throttled as one
   source. That is the honest trade-off for not building a location history; the digests are one-way.
 - **No IP allow-list or geo policy.** Belongs at the edge, not in this codebase.

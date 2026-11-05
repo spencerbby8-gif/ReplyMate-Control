@@ -18,7 +18,10 @@ ReplyMate's privacy model is documented in `docs/SPEC.md` and `docs/BLUEPRINT.md
 | No message content is readable | `src/lib/privacy/guard.ts` is an **allow-list**. `message`, `memory_fact`, `contact_summary`, `draft`, `style_profile`, `app_kv`, `contact` and `contact_channel` are denied *before a query is built* and throw `PrivacyViolation` (HTTP 451). |
 | Provider keys never leave the device | ReplyMate is BYOK — keys live in the Android Keystore (`rm_master`, AES/GCM/NoPadding). This platform stores no key material. Even `provider_def.key_ref` is excluded from every permitted projection. |
 | Secrets are never exposed | `envReport()` returns presence booleans only. `.env` is gitignored. `scripts/check-secrets.mjs` scans tracked content before commit. |
-| No production migrations, no deploys | The GitHub integration is **GET-only**. Migration SQL in `supabase/` is authored documentation for an owner to apply deliberately. Nothing here runs `db push` against the ReplyMate project. |
+| No production migrations, no deploys | The GitHub integration is **GET-only**. Migration SQL in `supabase/` is authored documentation. `scripts/apply-hardening.ts` refuses to run against a Supabase host or any database containing app tables. |
+| Telemetry carries no content | `lib/ingest/allowlist.ts` is a closed five-kind schema using `strictObject`, a recursive denied-key sweep, and value screening for email / phone / deep-link / credential shapes. There is no free-form payload column, so content has nowhere to go. |
+| Audit history cannot be rewritten | Database `BEFORE UPDATE` / `BEFORE DELETE` triggers raise `42501`. The hardening script proves this against a real probe row rather than trusting itself. |
+| This is not the production database | Checked at request time: the dashboard reports the `ctl_*` table count **and** asserts zero ReplyMate app tables are present in `DATABASE_URL`. |
 
 See [`docs/PRIVACY.md`](docs/PRIVACY.md) for the full access matrix and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module map.
 
@@ -132,9 +135,35 @@ When the credentials are absent the bridge reports `closed` and the affected pag
 - Lockout: 5 failed attempts → 15 minutes. Every attempt is audited, success or failure.
 - TOTP secrets: AES-256-GCM under a key derived from `CONTROL_ENC_KEY`. Enrolment is **refused** if that key is missing rather than degraded to plaintext.
 - Audit payloads: credential-shaped keys and values are replaced, content-shaped fields are dropped, depth and size are capped.
+- CSRF: explicit origin verification (`Sec-Fetch-Site`, then `Origin`/`Referer` host match) on every state-changing route — including all 18 control actions — layered on top of `SameSite=Lax`.
+- Login throttling: per-account lockout **and** a database-backed per-source limit whose distinct-target count trips before its raw volume count. That is what stops password guessing from becoming account enumeration. Digests only; no raw IPs or addresses are stored.
+- Sessions have an **absolute** ceiling as well as an idle expiry, so a stolen cookie used continuously still dies.
+- Token digests are keyed from `CONTROL_ENC_KEY`, not a pepper hardcoded in source. The login page reports `keyed`/`unkeyed` rather than implying protection that is absent.
 - No account-existence oracle: an unknown email and a wrong password return the identical response.
+- `AUTH_PROVIDER=supabase` really switches identity verification to Supabase Auth, and **fails closed with 503** when its credentials are missing instead of silently falling back to local hashes.
 
 ---
+
+## Milestone 2 — live data, telemetry and versioned config
+
+- **Device registration** with a required, non-futureable consent timestamp and a scoped bearer key
+  stored digest-only. Revocation stops ingestion immediately.
+- **Allow-listed telemetry** — five closed event kinds (`provider_error`, `listener_state`,
+  `draft_latency`, `app_crash`, `heartbeat`), validated by `strictObject` plus a recursive denied-key
+  sweep and PII value screening. A heartbeat reporting `syncEnabled=true` is refused with its own
+  error code. No free-form payload column exists.
+- **Operational diagnostics** computed from stored events: latency p50/p95/p99, provider error
+  distribution, crash count, listener grant ratio. A category with no events says so instead of
+  showing a plausible 0ms.
+- **Live Overview** — nine-row system health panel (database, identity provider, bridge, digest
+  keying, audit immutability, throttling, config delivery, telemetry, probes) and two privacy
+  invariants verified at request time: the `ctl_*` table count, and an assertion that **zero**
+  ReplyMate app tables exist in `DATABASE_URL`.
+- **Live Activity feed** with keyset pagination (cursor is the oldest row id on the page, so a
+  concurrent insert cannot shift the window and duplicate a row).
+- **Versioned remote configuration** — immutable revisions per edit, explicit publish, immutable
+  snapshot per release, and `GET /api/client/config?appVersion=` resolution with a `minAppVersion`
+  gate. Sensitive keys are excluded when the snapshot is built, not filtered at read time.
 
 ## Explicitly out of scope
 
