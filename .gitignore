@@ -1,0 +1,37 @@
+# --- Node / Next ---
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- Environment: never commit a credential ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Local database ---
+drizzle/
+*.sqlite
+*.db
+
+# --- Test / coverage ---
+coverage/
+.vitest/
+playwright-report/
+
+# --- Editors / OS ---
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.log
+
+# --- Tool caches ---
+.turbo/
+.eslintcache
