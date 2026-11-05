@@ -33,8 +33,8 @@ describe("correct configurations are accepted", () => {
     expect(() =>
       assertNoSecretInPublicVars({
         SUPABASE_SECRET_KEY: "sb_secret_AbCdEfGhIjKlMnOpQrStUvWxYz",
-        SUPABASE_TRANSACTION_POOLER: "postgresql://user:password@host:6543/postgres",
-        DATABASE_URL: "postgresql://user:password@localhost:5432/app_db",
+        SUPABASE_TRANSACTION_POOLER: "postgresql://fixture:notarealpassword@invalid.example:6543/postgres",
+        DATABASE_URL: "postgresql://fixture:notarealpassword@invalid.example:5432/app_db",
       }),
     ).not.toThrow();
   });
@@ -48,8 +48,8 @@ describe("correct configurations are accepted", () => {
 describe("secret material behind NEXT_PUBLIC_ is refused", () => {
   it.each([
     ["current Supabase secret key", { NEXT_PUBLIC_SB: "sb_secret_AbCdEfGhIjKlMnOpQrStUvWxYz" }],
-    ["OpenAI-shaped key", { NEXT_PUBLIC_AI: "sk-proj-ABCDEFGHIJ1234567890" }],
-    ["Supabase management token", { NEXT_PUBLIC_MGMT: "sbp_abcdefghijklmnopqrst" }],
+    ["OpenAI-shaped key", { NEXT_PUBLIC_AI: "sk-FIXTURENOTREAL000000000000" }],
+    ["Supabase management token", { NEXT_PUBLIC_MGMT: "sbp_FIXTURENOTREAL00000000" }],
     ["GitHub token", { NEXT_PUBLIC_GH: "ghp_FIXTURETOKEN0000000000000NOTREAL" }],
     ["Slack token", { NEXT_PUBLIC_SLACK: "xoxb-FIXTURE-0000000000-notreal" }],
   ])("refuses a %s", (_label, vars) => {
@@ -78,7 +78,7 @@ describe("the failure message is actionable and leaks nothing", () => {
     try {
       assertNoSecretInPublicVars({
         NEXT_PUBLIC_A: "sb_secret_AbCdEfGhIjKlMnOpQrStUvWxYz",
-        NEXT_PUBLIC_B: "sbp_abcdefghijklmnopqrst",
+        NEXT_PUBLIC_B: "sbp_FIXTURENOTREAL00000000",
         NEXT_PUBLIC_SAFE: "https://xdcsxxwhvpiissetbrdr.supabase.co",
       });
       throw new Error("expected a throw");

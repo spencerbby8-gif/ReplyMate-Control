@@ -32,18 +32,21 @@ const RULES = [
  * Files that legitimately discuss or synthesise credential-shaped strings
  * without containing a real credential.
  *
- * `tests/audit-redaction.test.ts` and `tests/ingest-allowlist.test.ts` are
- * listed because their fixtures MUST look like real secrets — that is the entire
- * point of those suites: they prove the redactor and the telemetry value-screen
- * actually catch GitHub, OpenAI, Google, Slack, JWT, bearer and connection-string
- * shapes. Every value there is a synthetic `FIXTURE…NOTREAL` placeholder. If a
- * real credential ever lands in either file, this allowlist is what would hide
- * it, so any change to it must be reviewed.
+ * `tests/audit-redaction.test.ts`, `tests/ingest-allowlist.test.ts` and
+ * `tests/env-secret-exposure.test.ts` are listed because their fixtures MUST look
+ * like real secrets — that is the entire point of those suites: they prove the
+ * redactor, the telemetry value-screen and the NEXT_PUBLIC leak guard actually
+ * catch GitHub, OpenAI, Google, Slack, JWT, bearer and management-token shapes.
+ * Every value there is a synthetic `FIXTURE…NOTREAL` placeholder, and the
+ * connection-string fixtures use `invalid.example` so they cannot resolve. If a
+ * real credential ever lands in one of these files, this allowlist is what would
+ * hide it, so any change to it must be reviewed.
  */
 const ALLOWLIST = new Set([
   "scripts/check-secrets.mjs",
   "tests/audit-redaction.test.ts",
   "tests/ingest-allowlist.test.ts",
+  "tests/env-secret-exposure.test.ts",
   ".env.example",
   "docs/PRIVACY.md",
   "docs/SECURITY.md",
