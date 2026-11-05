@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { ctlDevice, ctlDeviceEvent } from "@/db/schema";
 import { MAX_BATCH_SIZE, validateIngestBatch } from "@/lib/ingest/allowlist";
+import { clientVersionSupported } from "@/lib/ingest/contract";
 import { authenticateDevice, deviceWithinRateLimit } from "@/lib/ingest/auth";
 import { auditActions, recordAudit } from "@/lib/audit/logger";
 import { csrfFailureResponse } from "@/lib/auth/csrf";
@@ -38,6 +39,30 @@ export async function POST(request: Request) {
       detail: { code: auth.code },
     });
     return jsonError(auth.reason, auth.status, auth.code, requestId);
+  }
+
+  // Version gate: an older build cannot know the allow-list and would send fields
+  // that no longer exist. Refusing explicitly beats silently mis-parsing.
+  const appVersion = request.headers.get("x-replymate-app-version");
+  const versionCheck = clientVersionSupported(appVersion);
+  if (!versionCheck.supported) {
+    await recordAudit({
+      action: auditActions.ingestRejected,
+      actorEmail: auth.deviceLabel,
+      entity: "device",
+      entityId: auth.deviceId,
+      outcome: "denied",
+      requestId,
+      ip,
+      userAgent: agent,
+      detail: { code: "unsupported_version", appVersion, reason: versionCheck.reason },
+    });
+    return jsonError(
+      `${versionCheck.reason}. Send the X-ReplyMate-App-Version header.`,
+      426,
+      "unsupported_version",
+      requestId,
+    );
   }
 
   const limit = await deviceWithinRateLimit(auth.deviceId);

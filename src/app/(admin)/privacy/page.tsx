@@ -8,7 +8,7 @@ import { requireCapability } from "@/lib/authz/guard";
 import { envReport } from "@/config/env";
 import { REPLYMATE_SUPABASE_PROJECT_URL, REPLYMATE_APPLIED_MIGRATIONS, SOURCE_FILES } from "@/config/catalog";
 import { privacyInventory } from "@/lib/privacy/guard";
-import { fetchSupabaseMigrationLedger } from "@/lib/integrations/github";
+import { compareLiveToRepository } from "@/lib/supabase/migrations";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Privacy" };
@@ -31,7 +31,7 @@ export default async function PrivacyPage() {
   await requireCapability("privacy:view");
   const inventory = privacyInventory();
   const report = envReport();
-  const ledger = await fetchSupabaseMigrationLedger();
+  const ledger = await compareLiveToRepository();
 
   return (
     <>
@@ -168,26 +168,58 @@ export default async function PrivacyPage() {
               <span className="font-mono text-[11px]">exactly CRUD, owner-scoped by RLS</span>
             </div>
 
-            {ledger.ok ? (
-              <div className="border-t pt-3">
-                <p className="mb-2 font-medium">Ledger as read from {ledger.source}</p>
-                <ul className="space-y-1">
-                  {ledger.rows.map((row) => (
-                    <li key={`${row.version}-${row.file}`} className="flex items-baseline gap-2 font-mono text-[11px]">
-                      <span className="w-12 shrink-0 text-muted-foreground">{row.version}</span>
-                      <span className="min-w-0 flex-1 break-all">{row.file}</span>
-                      <span className="shrink-0 text-muted-foreground">{row.applied}</span>
-                    </li>
-                  ))}
-                </ul>
+            <div className="border-t pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-medium">Repository ledger vs live database</p>
+                <Badge variant={ledger.ok ? "success" : ledger.errors.length > 0 ? "muted" : "destructive"} className="font-mono text-[10px]">
+                  {ledger.ok ? "in agreement" : ledger.errors.length > 0 ? "not comparable" : "DRIFT"}
+                </Badge>
               </div>
-            ) : (
-              <p className="border-t pt-3 leading-relaxed text-muted-foreground">
-                The source ledger could not be read from this host ({ledger.error}). The versions above
-                come from <span className="font-mono">{SOURCE_FILES.supabaseReadme}</span> and are
-                shown as documented rather than presented as a live confirmation.
-              </p>
-            )}
+
+              {ledger.errors.length > 0 ? (
+                <p className="mt-2 leading-relaxed text-muted-foreground">
+                  {ledger.errors.join(" ")} The versions above come from{" "}
+                  <span className="font-mono">{SOURCE_FILES.supabaseReadme}</span> and are shown as
+                  documented rather than presented as a live confirmation.
+                </p>
+              ) : (
+                <>
+                  <p className="mt-1.5 font-mono text-[11px] text-muted-foreground">
+                    live [{ledger.live.join(", ")}] vs documented [{ledger.documented.join(", ")}]
+                  </p>
+                  {ledger.missing.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-destructive">
+                      Documented but NOT applied live: v{ledger.missing.join(", v")}
+                    </p>
+                  ) : null}
+                  {ledger.undocumented.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-destructive">
+                      Applied live but NOT documented in the repository: v{ledger.undocumented.join(", v")}
+                    </p>
+                  ) : null}
+                  {ledger.duplicated.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-destructive">Duplicated versions: v{ledger.duplicated.join(", v")}</p>
+                  ) : null}
+                  {!ledger.contiguous && ledger.live.length > 0 ? (
+                    <p className="mt-1 text-[11px] text-warning">The live sequence has a gap.</p>
+                  ) : null}
+                  <ul className="mt-2 space-y-1">
+                    {ledger.labels.map((row) => (
+                      <li key={row.version} className="flex items-baseline gap-2 font-mono text-[11px]">
+                        <span className="w-8 shrink-0 text-muted-foreground">v{row.version}</span>
+                        <span className="min-w-0 flex-1 truncate" title={row.label ?? undefined}>{row.label ?? "(no label)"}</span>
+                        <span className="shrink-0 text-muted-foreground">{row.appliedAt?.slice(0, 10) ?? "—"}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                    Read only. This platform never applies, repairs or writes a migration;{" "}
+                    <span className="font-mono">supabase/migrations/</span> is authored documentation for
+                    an owner to apply deliberately.
+                  </p>
+                </>
+              )}
+            </div>
           </CardContent>
         </Card>
 

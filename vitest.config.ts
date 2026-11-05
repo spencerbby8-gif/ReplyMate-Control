@@ -14,6 +14,10 @@ export default defineConfig({
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
+    // The Edge Function shared modules use Deno-style explicit ".ts" specifiers.
+    // Vitest resolves them here so the SAME logic is tested offline that the
+    // deployed function runs — no parallel implementation to drift.
+    extensions: [".ts", ".tsx", ".js", ".mjs", ".json"],
   },
   test: {
     environment: "node",
