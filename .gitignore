@@ -35,3 +35,6 @@ playwright-report/
 # --- Tool caches ---
 .turbo/
 .eslintcache
+
+# --- Durable encryption key (created on first boot; NEVER commit) ---
+.keys/

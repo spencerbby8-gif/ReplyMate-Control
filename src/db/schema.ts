@@ -643,3 +643,24 @@ export type CtlMonitorProbe = typeof ctlMonitorProbe.$inferSelect;
 export type CtlSupportTicket = typeof ctlSupportTicket.$inferSelect;
 export type CtlAiopsSession = typeof ctlAiopsSession.$inferSelect;
 export type CtlAiopsMessage = typeof ctlAiopsMessage.$inferSelect;
+
+/**
+ * Records the fingerprint of the key that stored credentials were minted under.
+ *
+ * Purpose: make a silent key rotation LOUD. When `CONTROL_ENC_KEY` disappeared
+ * from a regenerated `.env`, every stored token digest stopped matching and
+ * device credentials began returning 401 permanently — indistinguishable from
+ * "wrong key". Comparing the active fingerprint against this row turns that into
+ * an explicit, countable warning on the dashboard.
+ *
+ * The fingerprint is an HMAC of the key truncated to 16 hex characters: it
+ * identifies the key without revealing it.
+ */
+export const ctlKeyState = pgTable("ctl_key_state", {
+  id: integer("id").primaryKey().default(1),
+  digestFingerprint: text("digest_fingerprint"),
+  aeadFingerprint: text("aead_fingerprint"),
+  keySource: text("key_source", { enum: ["environment", "keyfile", "none"] }).notNull().default("none"),
+  observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  note: text("note"),
+});

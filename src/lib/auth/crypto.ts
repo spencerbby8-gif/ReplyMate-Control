@@ -6,7 +6,7 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { createCipheriv, createDecipheriv } from "node:crypto";
-import { env } from "@/config/env";
+import { resolveEncryptionKey, type KeySource } from "./keys";
 
 /**
  * Crypto primitives for the control plane.
@@ -90,10 +90,17 @@ export function generateToken(): string {
  * loss of defence-in-depth, not of correctness — but the UI reports it instead
  * of implying protection that is not there.
  */
+/**
+ * A fixed, clearly-labelled fallback. It exists so the app still functions with
+ * no key at all, but `digestKeyStrength()` reports `unkeyed` and the login page
+ * displays it: a deployment in this state has lost the ability to match any
+ * digest minted under a real key, and that must be visible.
+ */
 const FALLBACK_DIGEST_KEY = "rmctl-digest-unkeyed-fallback";
 
 function digestKey(): Buffer {
-  return Buffer.from(env.CONTROL_ENC_KEY ?? FALLBACK_DIGEST_KEY);
+  const resolved = resolveEncryptionKey();
+  return Buffer.from(resolved.value ?? FALLBACK_DIGEST_KEY);
 }
 
 export function digestToken(value: string): string {
@@ -101,7 +108,7 @@ export function digestToken(value: string): string {
 }
 
 export function digestKeyStrength(): "keyed" | "unkeyed" {
-  return env.CONTROL_ENC_KEY ? "keyed" : "unkeyed";
+  return resolveEncryptionKey().value !== null ? "keyed" : "unkeyed";
 }
 
 export function newId(): string {
@@ -120,12 +127,29 @@ export function safeEqual(a: string, b: string): boolean {
 // ---------------------------------------------------------------------------
 
 function encryptionKey(): Buffer | null {
-  if (!env.CONTROL_ENC_KEY) return null;
-  return createHmac("sha256", "rmctl-aead-key").update(env.CONTROL_ENC_KEY).digest();
+  const resolved = resolveEncryptionKey();
+  if (!resolved.value) return null;
+  return createHmac("sha256", "rmctl-aead-key").update(resolved.value).digest();
 }
 
 export function encryptionAvailable(): boolean {
   return encryptionKey() !== null;
+}
+
+/** Where the active key came from, for the UI. Never returns the key itself. */
+export function encryptionKeyStatus(): {
+  available: boolean;
+  source: KeySource;
+  fingerprint: string | null;
+  detail: string;
+} {
+  const resolved = resolveEncryptionKey();
+  return {
+    available: resolved.value !== null,
+    source: resolved.source,
+    fingerprint: resolved.fingerprint,
+    detail: resolved.detail,
+  };
 }
 
 export function encryptSecret(plaintext: string): string {

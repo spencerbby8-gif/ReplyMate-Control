@@ -33,6 +33,7 @@ import { generateToken, digestToken } from "@/lib/auth/crypto";
 import { revokeAllSessionsForAdmin, revokeSessionById } from "@/lib/auth/session";
 import { authorizeAdminChange } from "@/lib/authz/escalation";
 import { identityProvider } from "@/lib/auth/identity";
+import { observeKeyState } from "@/lib/auth/key-state";
 import { PrivacyViolation } from "@/lib/privacy/guard";
 import { fetchReleaseLedger, syncReleases } from "@/lib/integrations/github";
 import { runProbeSuite } from "@/lib/monitoring/probes";
@@ -229,6 +230,11 @@ export const controlActionSchema = z.union([
   }),
   z.object({
     resource: z.literal("device"),
+    operation: z.literal("reissueKey"),
+    values: z.object({ id: uuid, expiresInDays: z.number().int().min(1).max(365).default(90) }),
+  }),
+  z.object({
+    resource: z.literal("device"),
     operation: z.literal("revoke"),
     values: z.object({ id: uuid, reason: z.string().max(200).nullish() }),
   }),
@@ -312,6 +318,7 @@ const CAPABILITY: Record<string, Capability> = {
   "config:update": "config:manage",
   "config:publish": "config:manage",
   "device:register": "devices:manage",
+  "device:reissueKey": "devices:manage",
   "device:revoke": "devices:manage",
   "ticket:create": "support:manage",
   "ticket:update": "support:manage",
@@ -352,6 +359,7 @@ const ACTION_FOR: Record<string, AuditAction> = {
   "config:update": auditActions.configUpdated,
   "config:publish": auditActions.configPublished,
   "device:register": auditActions.deviceRegistered,
+  "device:reissueKey": auditActions.deviceRegistered,
   "device:revoke": auditActions.deviceRevoked,
   "ticket:create": auditActions.ticketCreated,
   "ticket:update": auditActions.ticketUpdated,
@@ -966,6 +974,54 @@ export async function executeControlAction(
         summary: `Device "${device.label}" registered. The ingest key is shown once and stored only as a digest.`,
       };
     }
+
+    case "device:reissueKey": {
+
+      const action = narrowAction(input, "device", "reissueKey");
+
+      const [device] = await db.select().from(ctlDevice).where(eq(ctlDevice.id, action.values.id));
+
+      if (!device) throw new NotFoundError("Device not found.");
+
+      if (device.status !== "active") throw new ConflictError("Only an active device can be issued a new key.");
+
+    
+
+      // The previous digest may be unreachable if the encryption key rotated; it is
+
+      // revoked so it cannot be used again even if the old key is restored.
+
+      await db.update(ctlDeviceToken).set({ revokedAt: new Date() }).where(and(eq(ctlDeviceToken.deviceId, device.id), isNull(ctlDeviceToken.revokedAt)));
+
+    
+
+      const fresh = generateToken();
+
+      const expiry = new Date(Date.now() + action.values.expiresInDays * 86_400_000);
+
+      await db.insert(ctlDeviceToken).values({ deviceId: device.id, tokenDigest: digestToken(fresh), label: `${device.label ?? "device"} ingest key (reissued)`, expiresAt: expiry });
+
+      await observeKeyState("device key reissued");
+
+    
+
+      return {
+
+        entity: "device",
+
+        entityId: device.id,
+
+        detail: { label: device.label, reason: "reissued", expiresAt: expiry.toISOString() },
+
+        responseOnly: { ingestKey: fresh },
+
+        summary: `New ingest key issued for "${device.label ?? device.id}". The previous key is revoked.`,
+
+      };
+
+    }
+
+    
 
     case "device:revoke": {
 

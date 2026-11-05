@@ -17,6 +17,7 @@ import { can } from "@/lib/authz/permissions";
 import { EVENT_KIND_DOCS, EVENT_KINDS, MAX_BATCH_SIZE } from "@/lib/ingest/allowlist";
 import { MAX_INGEST_PER_MINUTE } from "@/lib/ingest/auth";
 import { formatDateTime, formatNumber, formatRelative } from "@/lib/utils";
+import { keyStateReport } from "@/lib/auth/key-state";
 import {
   deviceEventSummary,
   listDeviceEvents,
@@ -36,11 +37,12 @@ export default async function DevicesPage({
   const manageable = can(admin.role, "devices:manage");
   const params = await searchParams;
 
-  const [devices, summary, diagnostics, events] = await Promise.all([
+  const [devices, summary, diagnostics, events, keyState] = await Promise.all([
     listDevicesWithActivity(),
     deviceEventSummary(),
     operationalDiagnostics(),
     listDeviceEvents({ deviceId: params.device, kind: params.kind, limit: 60 }),
+    keyStateReport(),
   ]);
 
   const activeDevices = devices.filter((row) => row.device.status === "active");
@@ -96,6 +98,24 @@ export default async function DevicesPage({
         />
         <StatCard label="Provider errors" value={diagnostics.providerErrors.total} hint={`${diagnostics.crashes} crash report(s)`} icon={Activity} tone={diagnostics.providerErrors.total > 0 ? "warning" : "muted"} />
       </div>
+
+      {keyState.rotated ? (
+        <Alert variant="destructive">
+          <KeyRound aria-hidden />
+          <AlertTitle>{keyState.orphaned.deviceTokens} device key(s) can no longer authenticate</AlertTitle>
+          <AlertDescription>
+            <p>
+              The encryption key changed (previously{" "}
+              <span className="font-mono">{keyState.previousFingerprint}</span>, now{" "}
+              <span className="font-mono">{keyState.fingerprint ?? "none"}</span>). Ingest keys are
+              stored as one-way digests, so those devices will receive <span className="font-mono">401
+              invalid_credential</span> — which looks like a wrong key rather than a rotated one. Use
+              <span className="font-medium"> Reissue key</span> on each affected device and redeploy
+              the new value to it.
+            </p>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <Card>
         <CardHeader>
@@ -180,6 +200,17 @@ export default async function DevicesPage({
                       ) : null}
                     </TableCell>
                     <TableCell className="text-right">
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                      {device.status === "active" && manageable ? (
+                        <AsyncAction
+                          endpoint="/api/control"
+                          payload={{ resource: "device", operation: "reissueKey", values: { id: device.id, expiresInDays: 90 } }}
+                          icon={<KeyRound className="size-4" aria-hidden />}
+                          label="Reissue key"
+                          variant="outline"
+                          confirm={`Issue a new ingest key for ${device.label ?? device.id}? The current key is revoked immediately and cannot be recovered, so the new one must be copied now.`}
+                        />
+                      ) : null}
                       {device.status === "active" ? (
                         <AsyncAction
                           endpoint="/api/control"
@@ -192,6 +223,7 @@ export default async function DevicesPage({
                       ) : (
                         <span className="text-[11px] text-muted-foreground">revoked</span>
                       )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}

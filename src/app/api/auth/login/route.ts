@@ -225,6 +225,10 @@ export async function POST(request: Request) {
 
   await clearFailedLogin(admin.id);
   await recordLoginAttempt({ ip, userAgent: agent, email, outcome: "success" });
+  // Records which key live credentials are being minted under, so a later
+  // rotation is detectable instead of silently orphaning them.
+  const { observeKeyState } = await import("@/lib/auth/key-state");
+  await observeKeyState("sign-in");
 
   // First verified Supabase sign-in activates the provisioned role holder.
   if (admin.status === "invited" && provider.name === "supabase") {

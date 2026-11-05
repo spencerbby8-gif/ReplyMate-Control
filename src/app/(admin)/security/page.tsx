@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { KeyRound, MonitorSmartphone, ShieldCheck, TicketCheck } from "lucide-react";
+import { AlertTriangle, KeyRound, MonitorSmartphone, ShieldCheck, TicketCheck } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/shared/stat-card";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -13,6 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { requireCapability } from "@/lib/authz/guard";
 import { envReport } from "@/config/env";
 import { encryptionAvailable } from "@/lib/auth/crypto";
+import { keyStateReport } from "@/lib/auth/key-state";
 import { LOCKOUT, listActiveSessions } from "@/lib/auth/session";
 import { formatDateTime, formatRelative } from "@/lib/utils";
 import { mfaPosture } from "@/lib/queries/admins";
@@ -31,6 +32,7 @@ export default async function SecurityPage() {
   ]);
 
   const encReady = encryptionAvailable();
+  const keyState = await keyStateReport();
 
   return (
     <>
@@ -47,6 +49,78 @@ export default async function SecurityPage() {
           </>
         }
       />
+
+      {keyState.rotated ? (
+        <Alert variant="destructive">
+          <AlertTriangle aria-hidden />
+          <AlertTitle>The encryption key changed — stored credentials are orphaned</AlertTitle>
+          <AlertDescription>
+            <p>
+              Credentials were minted under fingerprint{" "}
+              <span className="font-mono">{keyState.previousFingerprint}</span>; the active key is{" "}
+              <span className="font-mono">{keyState.fingerprint ?? "none"}</span> (
+              {keyState.source}). Because digests are one-way, these rows can no longer be matched and
+              will fail as &ldquo;invalid credential&rdquo; rather than reporting the real cause:
+            </p>
+            <p className="font-mono text-[11px]">
+              device keys: {keyState.orphaned.deviceTokens} · invitations: {keyState.orphaned.invites} ·
+              sessions: {keyState.orphaned.sessions} (benign — users simply sign in again)
+            </p>
+            <p>
+              Restore the previous key, or reissue the affected credentials from Devices. This is the
+              exact failure mode the keyfile resolver in{" "}
+              <span className="font-mono">lib/auth/keys.ts</span> exists to prevent.
+            </p>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {keyState.credentialsUnreachable ? (
+        <Alert variant="destructive">
+          <AlertTriangle aria-hidden />
+          <AlertTitle>No encryption key is available</AlertTitle>
+          <AlertDescription>
+            <p>
+              Stored device keys and invitations cannot be matched, and TOTP enrolment is refused.
+              {keyState.detail}
+            </p>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Encryption key</CardTitle>
+          <CardDescription>
+            Where the key came from and what depends on it. The fingerprint identifies the key without
+            revealing it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-xs">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-muted-foreground">Status</span>
+            <Badge variant={keyState.strength === "keyed" ? "success" : "destructive"} className="font-mono text-[10px]">
+              {keyState.strength}
+            </Badge>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-muted-foreground">Source</span>
+            <span className="font-mono text-[11px]">{keyState.source}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-muted-foreground">Fingerprint</span>
+            <span className="font-mono text-[11px]">{keyState.fingerprint ?? "—"}</span>
+          </div>
+          <p className="border-t pt-2 leading-relaxed text-muted-foreground">{keyState.detail}</p>
+          <p className="leading-relaxed text-muted-foreground">
+            Resolution order: <span className="font-mono">CONTROL_ENC_KEY</span> from the environment,
+            then <span className="font-mono">.keys/control-enc.key</span> (mode 0600, gitignored,
+            created on first use). The keyfile exists because this platform regenerates{" "}
+            <span className="font-mono">.env</span> on redeploy, which previously rotated the key
+            silently and orphaned every stored credential.
+          </p>
+        </CardContent>
+      </Card>
 
       {!encReady ? (
         <Alert variant="destructive">

@@ -27,7 +27,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { requireCapability } from "@/lib/authz/guard";
 import { envReport } from "@/config/env";
 import { identityStatus } from "@/lib/auth/identity";
-import { digestKeyStrength } from "@/lib/auth/crypto";
+import { keyStateReport } from "@/lib/auth/key-state";
 import { throttlePosture } from "@/lib/auth/rate-limit";
 import { currentRelease, draftDrift } from "@/lib/config/versioning";
 import { deviceEventSummary } from "@/lib/queries/devices";
@@ -82,7 +82,7 @@ export default async function DashboardPage({
     probes,
     events,
     identity,
-    digestStrength,
+    keyState,
     throttle,
     configRelease,
     drift,
@@ -107,7 +107,7 @@ export default async function DashboardPage({
     latestProbePerTarget(),
     listAudit({ limit: 12, beforeId: Number.isFinite(Number(params.before)) && Number(params.before) > 0 ? Number(params.before) : undefined }),
     Promise.resolve(identityStatus()),
-    Promise.resolve(digestKeyStrength()),
+    keyStateReport(),
     throttlePosture(),
     currentRelease(),
     draftDrift(),
@@ -304,9 +304,13 @@ export default async function DashboardPage({
                 detail: bridge.configured ? "read-only, allow-listed" : "closed — no credentials configured",
               },
               {
-                label: "Token digests",
-                tone: digestStrength === "keyed" ? ("ok" as const) : ("warn" as const),
-                detail: digestStrength === "keyed" ? "keyed from CONTROL_ENC_KEY" : "UNKEYED — set CONTROL_ENC_KEY",
+                label: "Encryption key",
+                tone: keyState.rotated || keyState.credentialsUnreachable ? ("bad" as const) : keyState.strength === "keyed" ? ("ok" as const) : ("warn" as const),
+                detail: keyState.rotated
+                  ? `KEY ROTATED:  device key(s) and  invitation(s) can no longer be matched. Reissue them.`
+                  : keyState.credentialsUnreachable
+                    ? "No key available while credentials are stored — they cannot be matched."
+                    : ` from `,
               },
               {
                 label: "Audit immutability",
