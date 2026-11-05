@@ -1,11 +1,14 @@
 import { auditActions, recordAudit } from "@/lib/audit/logger";
 import { destroySession, getSession } from "@/lib/auth/session";
 import { clientIp, jsonOk, newRequestId, userAgent } from "@/lib/http";
+import { csrfFailureResponse } from "@/lib/auth/csrf";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   const requestId = newRequestId();
+  const csrfFailure = csrfFailureResponse(request, requestId);
+  if (csrfFailure) return csrfFailure;
   const session = await getSession();
 
   if (session) {

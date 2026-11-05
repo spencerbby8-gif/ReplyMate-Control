@@ -5,6 +5,9 @@ import { AlertTriangle, Lock, ServerOff, ShieldCheck } from "lucide-react";
 import { LoginForm } from "@/components/auth/login-form";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { envReport } from "@/config/env";
+import { identityStatus } from "@/lib/auth/identity";
+import { digestKeyStrength } from "@/lib/auth/crypto";
+import { LOGIN_THROTTLE } from "@/lib/auth/rate-limit";
 import { getSession } from "@/lib/auth/session";
 import { countAdmins } from "@/lib/queries/admins";
 
@@ -21,6 +24,8 @@ export default async function LoginPage({
 
   const params = await searchParams;
   const report = envReport();
+  const identity = identityStatus();
+  const digestStrength = digestKeyStrength();
   const bootstrap = await countAdmins();
 
   return (
@@ -148,13 +153,25 @@ export default async function LoginPage({
               )}
             </p>
             <p className="font-mono text-[11px] text-muted-foreground/80">
-              auth_provider={report.authProvider} · supabase_bridge={report.supabase.configured ? "live" : "closed"}
+              auth_provider={identity.provider} · passwords={identity.passwordStore} · mfa=
+              {identity.mfaVerifier}
             </p>
-            {report.authProvider === "supabase" && !report.supabase.hasServiceRoleKey ? (
+            <p className="text-[11px] leading-relaxed text-muted-foreground/80">{identity.detail}</p>
+            <p className="font-mono text-[11px] text-muted-foreground/80">
+              supabase_bridge={report.supabase.configured ? "live" : "closed"} · token_digest=
+              {digestStrength} · csrf=origin-checked
+            </p>
+            <p className="text-[11px] leading-relaxed text-muted-foreground/80">
+              Throttling: 5 failures locks an account for 15 minutes, and a source that fails against{" "}
+              {LOGIN_THROTTLE.maxDistinctTargets} distinct accounts within{" "}
+              {LOGIN_THROTTLE.windowMinutes} minutes is refused for {LOGIN_THROTTLE.cooldownMinutes}{" "}
+              minutes — which is what stops password guessing from becoming account enumeration.
+            </p>
+            {!identity.configured ? (
               <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-warning">
                 <ServerOff className="mt-0.5 size-3 shrink-0" aria-hidden />
-                AUTH_PROVIDER is set to supabase but the service-role key is absent — admin
-                invitation is unavailable until it is configured.
+                The configured identity provider is not usable, so sign-in fails closed rather than
+                falling back to local password hashes.
               </p>
             ) : null}
           </div>

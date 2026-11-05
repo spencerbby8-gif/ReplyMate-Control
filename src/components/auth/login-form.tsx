@@ -90,8 +90,9 @@ export function LoginForm() {
       </Button>
 
       <p className="text-center text-[11px] leading-relaxed text-muted-foreground">
-        After 5 failed attempts the account locks for 15 minutes. Every attempt is written to the
-        append-only audit log.
+        After 5 failed attempts the account locks for 15 minutes, and a source that fails against
+        too many distinct accounts is throttled separately. Every attempt — success, failure or
+        refusal — is written to the append-only audit log.
       </p>
     </form>
   );

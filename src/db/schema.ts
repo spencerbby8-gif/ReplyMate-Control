@@ -116,6 +116,33 @@ export const ctlInvite = pgTable(
   ],
 );
 
+/**
+ * Login throttle ledger.
+ *
+ * The per-account lockout in `ctl_admin` stops a single account being brute
+ * forced, but says nothing about one client trying five passwords against ten
+ * thousand accounts. This table backs the per-source limit in
+ * `lib/auth/rate-limit.ts`. Rows are short-lived and prunable; they store a
+ * salted digest of the source identifier, never a raw credential.
+ */
+export const ctlLoginAttempt = pgTable(
+  "ctl_login_attempt",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    ts: timestamp("ts", { withTimezone: true }).notNull().defaultNow(),
+    /** SHA-256 of (ip | user-agent class). Not the raw IP, so the ledger is not a tracking DB. */
+    sourceDigest: text("source_digest").notNull(),
+    /** SHA-256 of the attempted email. Lets us count distinct targets without storing them. */
+    emailDigest: text("email_digest"),
+    outcome: text("outcome", { enum: ["success", "failure", "locked"] }).notNull(),
+    reason: text("reason"),
+  },
+  (t) => [
+    index("ctl_login_attempt_source_ts_idx").on(t.sourceDigest, t.ts),
+    index("ctl_login_attempt_ts_idx").on(t.ts),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Audit (append-only — there is deliberately no UPDATE/DELETE surface)
 // ---------------------------------------------------------------------------

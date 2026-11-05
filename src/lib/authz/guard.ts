@@ -5,6 +5,7 @@ import { can } from "@/lib/authz/permissions";
 import type { Capability } from "@/config/nav";
 import { auditActions, recordAudit } from "@/lib/audit/logger";
 import { clientIp, jsonError, newRequestId, userAgent } from "@/lib/http";
+import { csrfFailureResponse } from "@/lib/auth/csrf";
 import { isPrivacyViolation } from "@/lib/privacy/guard";
 
 /**
@@ -49,6 +50,10 @@ export async function apiRequire(
   capability: Capability,
 ): Promise<ApiAuth> {
   const requestId = newRequestId();
+
+  // NextRequest extends Request, so this is safe for both accepted shapes.
+  const csrfFailure = csrfFailureResponse(request as Request, requestId);
+  if (csrfFailure) return { ok: false, response: csrfFailure };
   const session = await getSession({ requireMfa: true });
 
   if (!session) {
@@ -81,21 +86,4 @@ export async function apiRequire(
   }
 
   return { ok: true, session, requestId };
-}
-
-/** Wraps a handler so privacy violations become 451 rather than a 500 leak. */
-export async function withPrivacyGuard<T>(fn: () => Promise<T>): Promise<T> {
-  try {
-    return await fn();
-  } catch (error) {
-    if (isPrivacyViolation(error)) {
-      await recordAudit({
-        action: auditActions.privacyViolation,
-        outcome: "denied",
-        detail: { reason: error.message },
-      });
-      throw error;
-    }
-    throw error;
-  }
 }

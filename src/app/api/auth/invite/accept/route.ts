@@ -3,9 +3,11 @@ import { z } from "zod";
 import { db } from "@/db";
 import { ctlAdmin, ctlInvite, type AdminRole } from "@/db/schema";
 import { auditActions, recordAudit } from "@/lib/audit/logger";
-import { hashPassword, sha256Hex } from "@/lib/auth/crypto";
+import { hashPassword, digestToken } from "@/lib/auth/crypto";
 import { isRole } from "@/lib/authz/permissions";
+import { identityProvider } from "@/lib/auth/identity";
 import { clientIp, jsonError, jsonOk, newRequestId, userAgent } from "@/lib/http";
+import { csrfFailureResponse } from "@/lib/auth/csrf";
 import { findPendingInviteByHash, getAdminByEmail } from "@/lib/queries/admins";
 
 export const dynamic = "force-dynamic";
@@ -25,6 +27,8 @@ const bodySchema = z.object({
  */
 export async function POST(request: Request) {
   const requestId = newRequestId();
+  const csrfFailure = csrfFailureResponse(request, requestId);
+  if (csrfFailure) return csrfFailure;
   const ip = clientIp(request);
   const agent = userAgent(request);
 
@@ -38,7 +42,19 @@ export async function POST(request: Request) {
     );
   }
 
-  const tokenHash = sha256Hex(parsed.data.token);
+  // In supabase mode the password is set through Supabase Auth's own email
+  // link, so this local redemption path must not run: it would create a local
+  // credential that nothing authenticates against.
+  if (identityProvider().name === "supabase") {
+    return jsonError(
+      "AUTH_PROVIDER=supabase: invitations are redeemed through the Supabase Auth email link, not this endpoint.",
+      409,
+      "provider_mismatch",
+      requestId,
+    );
+  }
+
+  const tokenHash = digestToken(parsed.data.token);
   const invite = await findPendingInviteByHash(tokenHash);
   if (!invite) {
     await recordAudit({

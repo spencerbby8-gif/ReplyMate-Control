@@ -5,7 +5,7 @@ import { MailWarning, ShieldCheck } from "lucide-react";
 import { AcceptInviteForm } from "@/components/auth/accept-invite-form";
 import { Button } from "@/components/ui/button";
 import { getSession } from "@/lib/auth/session";
-import { sha256Hex } from "@/lib/auth/crypto";
+import { digestToken } from "@/lib/auth/crypto";
 import { findPendingInviteByHash } from "@/lib/queries/admins";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,7 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
   if (session) redirect("/dashboard");
 
   const { token } = await params;
-  const invite = token ? await findPendingInviteByHash(sha256Hex(token)) : null;
+  const invite = token ? await findPendingInviteByHash(digestToken(token)) : null;
 
   if (!invite) {
     return (

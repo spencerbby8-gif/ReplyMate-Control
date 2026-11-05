@@ -72,13 +72,36 @@ function scryptAsync(
 // Tokens
 // ---------------------------------------------------------------------------
 
-/** Opaque single-use token. Caller stores only `sha256Hex(token)`. */
+/** Opaque single-use token. Caller stores only `digestToken(token)`. */
 export function generateToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
-export function sha256Hex(value: string): string {
-  return createHmac("sha256", "rmctl-digest").update(value).digest("hex");
+/**
+ * Keyed digest used for session and invitation tokens.
+ *
+ * This replaced an HMAC with a pepper that was hardcoded in source, which added
+ * nothing: anyone who could read the repository could read the pepper. The
+ * digest is now keyed from `CONTROL_ENC_KEY`, so a database leak alone does not
+ * let an attacker build a lookup table against stolen digests.
+ *
+ * When `CONTROL_ENC_KEY` is absent it degrades to plain SHA-256 and says so via
+ * `digestKeyStrength()`. Tokens are still 256-bit CSPRNG output, so this is a
+ * loss of defence-in-depth, not of correctness — but the UI reports it instead
+ * of implying protection that is not there.
+ */
+const FALLBACK_DIGEST_KEY = "rmctl-digest-unkeyed-fallback";
+
+function digestKey(): Buffer {
+  return Buffer.from(env.CONTROL_ENC_KEY ?? FALLBACK_DIGEST_KEY);
+}
+
+export function digestToken(value: string): string {
+  return createHmac("sha256", digestKey()).update(value).digest("hex");
+}
+
+export function digestKeyStrength(): "keyed" | "unkeyed" {
+  return env.CONTROL_ENC_KEY ? "keyed" : "unkeyed";
 }
 
 export function newId(): string {
@@ -134,7 +157,7 @@ export function decryptSecret(payload: string): string {
   ]).toString("utf8");
 }
 
-/** Masks a value for logs/audit. Returns only a length hint — never content. */
+/** Masks a value for logs/audit. Names the withheld thing; never carries it. */
 export function maskSecret(label: string): string {
   return `${label}:[redacted]`;
 }

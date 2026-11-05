@@ -7,7 +7,8 @@ import {
   hashPassword,
   maskSecret,
   safeEqual,
-  sha256Hex,
+  digestToken,
+  digestKeyStrength,
   verifyPassword,
 } from "@/lib/auth/crypto";
 
@@ -61,14 +62,14 @@ describe("token generation", () => {
 
   it("digests deterministically so a stored hash can be looked up", () => {
     const token = generateToken();
-    expect(sha256Hex(token)).toBe(sha256Hex(token));
-    expect(sha256Hex(token)).not.toBe(sha256Hex(generateToken()));
-    expect(sha256Hex(token)).toMatch(/^[a-f0-9]{64}$/);
+    expect(digestToken(token)).toBe(digestToken(token));
+    expect(digestToken(token)).not.toBe(digestToken(generateToken()));
+    expect(digestToken(token)).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("does not leak the token through its digest", () => {
     const token = generateToken();
-    expect(sha256Hex(token)).not.toContain(token);
+    expect(digestToken(token)).not.toContain(token);
   });
 });
 

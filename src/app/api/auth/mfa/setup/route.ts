@@ -6,6 +6,7 @@ import { decryptSecret, encryptSecret, encryptionAvailable } from "@/lib/auth/cr
 import { getSession } from "@/lib/auth/session";
 import { generateTotpSecret, otpauthUri, totpConfig, verifyTotp } from "@/lib/auth/totp";
 import { clientIp, jsonError, jsonOk, newRequestId, userAgent } from "@/lib/http";
+import { csrfFailureResponse } from "@/lib/auth/csrf";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,8 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: Request) {
   const requestId = newRequestId();
+  const csrfFailure = csrfFailureResponse(request, requestId);
+  if (csrfFailure) return csrfFailure;
   const session = await getSession({ requireMfa: false });
   if (!session) return jsonError("Authentication required.", 401, "unauthenticated", requestId);
 
@@ -66,6 +69,8 @@ export async function POST(request: Request) {
 /** MFA enrolment, step 2 of 2 — proves possession before the factor goes live. */
 export async function PUT(request: Request) {
   const requestId = newRequestId();
+  const csrfFailure = csrfFailureResponse(request, requestId);
+  if (csrfFailure) return csrfFailure;
   const session = await getSession({ requireMfa: false });
   if (!session) return jsonError("Authentication required.", 401, "unauthenticated", requestId);
   if (!session.admin.mfaSecretEnc) {

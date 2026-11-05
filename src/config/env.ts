@@ -15,7 +15,16 @@ const envSchema = z.object({
   // Control-plane crypto + session
   CONTROL_ENC_KEY: z.string().min(32).optional(),
   SESSION_COOKIE_NAME: z.string().min(1).default("rmctl_session"),
+  /** Idle expiry. Extended by activity, but never past the absolute ceiling. */
   SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(720).default(8),
+  /** Absolute ceiling on a session's life regardless of activity. */
+  SESSION_ABSOLUTE_TTL_HOURS: z.coerce.number().int().min(1).max(720).default(72),
+  /**
+   * Public base URL of this deployment, used to validate the Origin header for
+   * CSRF defence. Optional: when absent, the request's own Host is the only
+   * accepted origin.
+   */
+  CONTROL_PUBLIC_URL: z.string().url().optional(),
 
   // Bootstrap (used once by scripts/bootstrap.ts, never by request handlers)
   BOOTSTRAP_OWNER_EMAIL: z.string().email().optional(),

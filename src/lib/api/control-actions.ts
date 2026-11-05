@@ -18,17 +18,18 @@ import {
   providerStatus,
   releaseStatus,
   routeTask,
-  subscriptionStatus,
   thinkingLevel,
   ticketStatus,
   type AdminRole,
 } from "@/db/schema";
 import type { Capability } from "@/config/nav";
+import { env } from "@/config/env";
 import { PROVIDER_CATALOGUE, effectiveOutputCap } from "@/config/catalog";
 import { auditActions, recordAudit, type AuditAction } from "@/lib/audit/logger";
-import { generateToken, sha256Hex } from "@/lib/auth/crypto";
+import { generateToken, digestToken } from "@/lib/auth/crypto";
 import { revokeAllSessionsForAdmin, revokeSessionById } from "@/lib/auth/session";
-import { outranks, isRole } from "@/lib/authz/permissions";
+import { authorizeAdminChange } from "@/lib/authz/escalation";
+import { identityProvider } from "@/lib/auth/identity";
 import { PrivacyViolation } from "@/lib/privacy/guard";
 import { fetchReleaseLedger, syncReleases } from "@/lib/integrations/github";
 import { runProbeSuite } from "@/lib/monitoring/probes";
@@ -381,23 +382,80 @@ export async function executeControlAction(
         throw new ForbiddenError("Only an owner may invite another owner.");
       }
 
+      const expiresAt = new Date(Date.now() + expiresInHours * 3_600_000);
+      const provider = identityProvider();
+
+      // ---- Supabase Auth is the identity provider -------------------------
+      // The invitation email and the password are Supabase's business, so this
+      // app must NOT mint a local redemption link: that link would set a local
+      // password nobody would ever use, and the operator would believe they had
+      // invited a Supabase identity.
+      if (provider.name === "supabase") {
+        const invited = await provider.invite(normalized, {
+          redirectTo: `${publicBaseUrl()}/login`,
+        });
+        if (!invited.ok) {
+          if (invited.code === "already_exists") throw new ConflictError(invited.reason);
+          throw new UpstreamError(invited.reason);
+        }
+
+        // Tracking row only. The token is generated and immediately discarded —
+        // it is never returned, so it cannot be redeemed through this app.
+        await db
+          .insert(ctlInvite)
+          .values({
+            email: normalized,
+            role,
+            tokenHash: digestToken(generateToken()),
+            invitedBy: actor.adminId,
+            mfaRequired,
+            expiresAt,
+          })
+          .onConflictDoNothing();
+
+        // Provision the role holder now, so the account is visible in Users with
+        // status `invited`. The login route activates it on first verified
+        // Supabase sign-in and links the auth user id.
+        await db
+          .insert(ctlAdmin)
+          .values({
+            email: normalized,
+            role,
+            status: "invited",
+            supabaseUserId: invited.externalUserId ? (invited.externalUserId as string) : null,
+            mfaRequired,
+          })
+          .onConflictDoUpdate({
+            target: ctlAdmin.email,
+            set: { role, mfaRequired, updatedAt: new Date() },
+          });
+
+        return {
+          entity: "invite",
+          entityId: null,
+          detail: { email: normalized, role, mfaRequired, transport: "supabase-email", externalUserId: invited.externalUserId },
+          summary: `${invited.deliveryNote} Invitation sent to ${normalized} (${role}).`,
+        };
+      }
+
+      // ---- Local identity provider ----------------------------------------
       const token = generateToken();
       const [invite] = await db
         .insert(ctlInvite)
         .values({
           email: normalized,
           role,
-          tokenHash: sha256Hex(token),
+          tokenHash: digestToken(token),
           invitedBy: actor.adminId,
           mfaRequired,
-          expiresAt: new Date(Date.now() + expiresInHours * 3_600_000),
+          expiresAt,
         })
         .returning({ id: ctlInvite.id, expiresAt: ctlInvite.expiresAt });
 
       return {
         entity: "invite",
         entityId: invite.id,
-        detail: { email: normalized, role, mfaRequired, expiresInHours },
+        detail: { email: normalized, role, mfaRequired, expiresInHours, transport: "signed-link-from-this-app" },
         responseOnly: { inviteUrl: `/invite/${token}` },
         summary: `Invitation created for ${normalized} (${role}).`,
       };
@@ -426,17 +484,23 @@ export async function executeControlAction(
       const { id, role, status, mfaRequired } = action.values;
       const [target] = await db.select().from(ctlAdmin).where(eq(ctlAdmin.id, id));
       if (!target) throw new NotFoundError("Administrator not found.");
-      if (target.id === actor.adminId && (status === "suspended" || (role && !outranks(actor.role, role)))) {
-        throw new ConflictError("You cannot suspend or demote your own account.");
-      }
-      if (!outranks(actor.role, target.role) && target.id !== actor.adminId) {
-        throw new ForbiddenError(`A ${actor.role} may only modify accounts below their own rank.`);
-      }
-      if (role && !outranks(actor.role, role) && role !== target.role) {
-        throw new ForbiddenError(`A ${actor.role} may not grant the ${role} role.`);
-      }
-      if (target.role === "owner" && actor.role !== "owner") {
-        throw new ForbiddenError("Only an owner may modify an owner account.");
+
+      // Single source of truth for the escalation matrix — the same pure
+      // function the regression tests exercise.
+      const decision = authorizeAdminChange(
+        { id: actor.adminId, role: actor.role },
+        { id: target.id, role: target.role, status: target.status },
+        { role, status, mfaRequired },
+      );
+      if (!decision.allowed) {
+        switch (decision.code) {
+          case "self_action":
+            throw new ConflictError(decision.reason);
+          case "no_change":
+            throw new ConflictError(decision.reason);
+          default:
+            throw new ForbiddenError(decision.reason);
+        }
       }
 
       const before = { role: target.role, status: target.status, mfaRequired: target.mfaRequired };
@@ -464,11 +528,19 @@ export async function executeControlAction(
     case "admin:resetMfa": {
 
       const action = narrowAction(input, "admin", "resetMfa");
-      const [target] = await db.select({ id: ctlAdmin.id, email: ctlAdmin.email, role: ctlAdmin.role }).from(ctlAdmin).where(eq(ctlAdmin.id, action.values.id));
+      const [target] = await db
+        .select({ id: ctlAdmin.id, email: ctlAdmin.email, role: ctlAdmin.role, status: ctlAdmin.status })
+        .from(ctlAdmin)
+        .where(eq(ctlAdmin.id, action.values.id));
       if (!target) throw new NotFoundError("Administrator not found.");
-      if (!outranks(actor.role, target.role) && target.id !== actor.adminId) {
-        throw new ForbiddenError("You may only reset MFA for accounts below your rank.");
-      }
+      // MFA reset is a privilege change, so it goes through the same policy as a
+      // role or status change rather than a bespoke rank comparison.
+      const mfaDecision = authorizeAdminChange(
+        { id: actor.adminId, role: actor.role },
+        { id: target.id, role: target.role, status: target.status },
+        { mfaRequired: false },
+      );
+      if (!mfaDecision.allowed) throw new ForbiddenError(mfaDecision.reason);
       await db
         .update(ctlAdmin)
         .set({ mfaSecretEnc: null, mfaEnrolledAt: null, mfaLastStep: null, updatedAt: new Date() })
@@ -915,6 +987,15 @@ function coerceConfigValue(
   }
 }
 
+/**
+ * Base URL for links this app hands to an external service. Derived from
+ * CONTROL_PUBLIC_URL when set; otherwise null, in which case the caller must not
+ * hand out a link at all.
+ */
+export function publicBaseUrl(): string {
+  return (env.CONTROL_PUBLIC_URL ?? "").replace(/\/$/, "");
+}
+
 export class ConflictError extends Error {
   readonly status = 409;
   readonly code = "conflict";
@@ -940,6 +1021,3 @@ export function httpStatusFor(error: unknown): { status: number; code: string } 
   if (error instanceof z.ZodError) return { status: 400, code: "invalid_input" };
   return { status: 500, code: "internal_error" };
 }
-
-// Re-exported so the dispatcher can validate roles without a second import path.
-export { isRole, adminRole, subscriptionStatus };

@@ -9,7 +9,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { requireCapability } from "@/lib/authz/guard";
 import { formatDateTime } from "@/lib/utils";
-import { mfaPosture } from "@/lib/queries/admins";
 import { auditStats, distinctAuditActions, listAudit } from "@/lib/queries/ops";
 
 export const dynamic = "force-dynamic";
@@ -24,14 +23,11 @@ export default async function AuditPage({
   const params = await searchParams;
   const limit = Math.min(Math.max(Number(params.limit ?? 100) || 100, 10), 500);
 
-  const [entries, stats, actions, posture] = await Promise.all([
+  const [entries, stats, actions] = await Promise.all([
     listAudit({ limit, action: params.action }),
     auditStats(),
     distinctAuditActions(),
-    mfaPosture(),
   ]);
-
-  void posture;
 
   return (
     <>

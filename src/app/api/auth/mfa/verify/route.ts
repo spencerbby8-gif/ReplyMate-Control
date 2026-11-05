@@ -7,6 +7,7 @@ import { decryptSecret } from "@/lib/auth/crypto";
 import { getSession, markSessionMfaVerified } from "@/lib/auth/session";
 import { verifyTotp } from "@/lib/auth/totp";
 import { clientIp, jsonError, jsonOk, newRequestId, userAgent } from "@/lib/http";
+import { csrfFailureResponse } from "@/lib/auth/csrf";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,8 @@ const bodySchema = z.object({ code: z.string().regex(/^\d{6}$/, "Enter the 6-dig
 /** Completes sign-in for a session whose account has an enrolled TOTP factor. */
 export async function POST(request: Request) {
   const requestId = newRequestId();
+  const csrfFailure = csrfFailureResponse(request, requestId);
+  if (csrfFailure) return csrfFailure;
   const ip = clientIp(request);
   const agent = userAgent(request);
 

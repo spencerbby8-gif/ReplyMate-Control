@@ -247,12 +247,6 @@ const TOOLS: Tool[] = [
     keywords: /\b(audit|log|logs|denied|denials|who did|activity|trail)\b/i,
     run: async () => {
       const stats = await auditStats();
-      const recent = await db
-        .select({ action: ctlAiopsMessage.role, ts: ctlAiopsMessage.createdAt })
-        .from(ctlAiopsMessage)
-        .limit(0)
-        .catch(() => []);
-      void recent;
       return {
         data: stats,
         render: (data: never) => {
@@ -504,7 +498,6 @@ async function callLlm(
       text = choices?.[0]?.message?.content ?? "";
     }
 
-    void started;
     if (!text.trim()) return { ok: false, error: "provider returned an empty completion" };
     return { ok: true, text: text.trim() };
   } catch (error) {

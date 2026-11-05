@@ -48,6 +48,35 @@ export async function getAdminById(id: string) {
   return rows[0] ?? null;
 }
 
+/**
+ * Records the Supabase Auth user id behind a control-plane administrator.
+ *
+ * The id is an opaque UUID — not an email — and it is the only end-user-shaped
+ * identifier this platform stores. It exists so role lookups stay stable when
+ * Supabase Auth is the identity provider.
+ */
+export async function linkSupabaseUser(adminId: string, supabaseUserId: string): Promise<void> {
+  await db
+    .update(ctlAdmin)
+    .set({ supabaseUserId, updatedAt: new Date() })
+    .where(eq(ctlAdmin.id, adminId));
+}
+
+/**
+ * Activates a provisioned-but-invited administrator after their identity has
+ * been verified by the external provider.
+ *
+ * Only ever called from the login route, and only after `identityProvider()`
+ * has confirmed the password against Supabase Auth. It deliberately does not
+ * create a local password hash: in this mode the credential lives in Supabase.
+ */
+export async function activateInvitedAdmin(adminId: string): Promise<void> {
+  await db
+    .update(ctlAdmin)
+    .set({ status: "active", lastLoginAt: new Date(), updatedAt: new Date() })
+    .where(eq(ctlAdmin.id, adminId));
+}
+
 export async function listInvites() {
   return db
     .select({

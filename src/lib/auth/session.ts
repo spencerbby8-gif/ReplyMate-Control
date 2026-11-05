@@ -3,7 +3,7 @@ import { and, eq, gt, isNull, lt, or } from "drizzle-orm";
 import { db } from "@/db";
 import { ctlAdmin, ctlSession, type CtlAdmin } from "@/db/schema";
 import { env } from "@/config/env";
-import { generateToken, sha256Hex } from "./crypto";
+import { generateToken, digestToken } from "./crypto";
 
 /**
  * Opaque-cookie sessions.
@@ -16,6 +16,14 @@ import { generateToken, sha256Hex } from "./crypto";
 
 export const SESSION_COOKIE = env.SESSION_COOKIE_NAME;
 const TTL_MS = env.SESSION_TTL_HOURS * 60 * 60 * 1000;
+/**
+ * Absolute ceiling on a session's life, independent of activity.
+ *
+ * Without this, a sliding session that is used at least once per TTL never dies
+ * — so a stolen cookie stays valid indefinitely as long as the thief keeps using
+ * it. Idle expiry alone does not cover that case.
+ */
+const ABSOLUTE_TTL_MS = env.SESSION_ABSOLUTE_TTL_HOURS * 60 * 60 * 1000;
 
 export const LOCKOUT = {
   maxFailedAttempts: 5,
@@ -42,11 +50,13 @@ export async function createSession(
   context: { ip?: string | null; userAgent?: string | null; mfaVerified?: boolean },
 ) {
   const token = generateToken();
-  const expiresAt = new Date(Date.now() + TTL_MS);
+  const createdAt = Date.now();
+  // Idle expiry can never be configured past the absolute ceiling.
+  const expiresAt = new Date(Math.min(createdAt + TTL_MS, createdAt + ABSOLUTE_TTL_MS));
 
   await db.insert(ctlSession).values({
     adminId,
-    tokenHash: sha256Hex(token),
+    tokenHash: digestToken(token),
     ip: context.ip ?? null,
     userAgent: context.userAgent ? context.userAgent.slice(0, 400) : null,
     mfaVerified: context.mfaVerified ?? false,
@@ -66,15 +76,18 @@ export async function getSession(options?: {
   const token = jar.get(SESSION_COOKIE)?.value;
   if (!token) return null;
 
+  const now = Date.now();
   const rows = await db
     .select({ admin: ctlAdmin, session: ctlSession })
     .from(ctlSession)
     .innerJoin(ctlAdmin, eq(ctlAdmin.id, ctlSession.adminId))
     .where(
       and(
-        eq(ctlSession.tokenHash, sha256Hex(token)),
+        eq(ctlSession.tokenHash, digestToken(token)),
         isNull(ctlSession.revokedAt),
-        gt(ctlSession.expiresAt, new Date()),
+        gt(ctlSession.expiresAt, new Date(now)),
+        // Absolute ceiling: a continuously-used session still dies.
+        gt(ctlSession.createdAt, new Date(now - ABSOLUTE_TTL_MS)),
         eq(ctlAdmin.status, "active"),
       ),
     )
@@ -97,9 +110,19 @@ export async function getSession(options?: {
 }
 
 export async function markSessionMfaVerified(sessionId: string) {
-  await db.update(ctlSession).set({ mfaVerified: true }).where(eq(ctlSession.id, sessionId));
-  const expiresAt = new Date(Date.now() + TTL_MS);
-  await db.update(ctlSession).set({ expiresAt }).where(eq(ctlSession.id, sessionId));
+  const [session] = await db
+    .select({ createdAt: ctlSession.createdAt })
+    .from(ctlSession)
+    .where(eq(ctlSession.id, sessionId));
+  const now = Date.now();
+  // MFA verification extends the idle window but must not extend the session
+  // past its absolute ceiling.
+  const absoluteDeadline = session ? session.createdAt.getTime() + ABSOLUTE_TTL_MS : now + ABSOLUTE_TTL_MS;
+  const expiresAt = new Date(Math.min(now + TTL_MS, absoluteDeadline));
+  await db
+    .update(ctlSession)
+    .set({ mfaVerified: true, expiresAt })
+    .where(eq(ctlSession.id, sessionId));
   const jar = await cookies();
   const existing = jar.get(SESSION_COOKIE)?.value;
   if (existing) jar.set(SESSION_COOKIE, existing, cookieOptions(expiresAt));
@@ -112,7 +135,7 @@ export async function destroySession() {
     await db
       .update(ctlSession)
       .set({ revokedAt: new Date() })
-      .where(eq(ctlSession.tokenHash, sha256Hex(token)));
+      .where(eq(ctlSession.tokenHash, digestToken(token)));
   }
   jar.delete(SESSION_COOKIE);
 }
@@ -159,12 +182,23 @@ export async function purgeExpiredSessions() {
   return result.length;
 }
 
-/** Login throttle state for an account. */
+/**
+ * Login throttle state for an account.
+ *
+ * A lock that has already expired is reported separately: the failure counter
+ * must be treated as reset, otherwise the very next failure re-locks the account
+ * instantly and the user never gets a fresh set of attempts.
+ */
 export function lockoutState(admin: Pick<CtlAdmin, "failedLoginCount" | "lockedUntil">) {
-  const locked = Boolean(admin.lockedUntil && admin.lockedUntil.getTime() > Date.now());
+  const now = Date.now();
+  const locked = Boolean(admin.lockedUntil && admin.lockedUntil.getTime() > now);
+  const expiredLock = Boolean(admin.lockedUntil && admin.lockedUntil.getTime() <= now);
+  const effectiveCount = expiredLock ? 0 : admin.failedLoginCount;
   return {
     locked,
-    remainingAttempts: Math.max(0, LOCKOUT.maxFailedAttempts - admin.failedLoginCount),
+    expiredLock,
+    effectiveCount,
+    remainingAttempts: locked ? 0 : Math.max(0, LOCKOUT.maxFailedAttempts - effectiveCount),
     lockedUntil: locked ? admin.lockedUntil : null,
   };
 }

@@ -15,6 +15,8 @@ export const auditActions = {
   authLoginSuccess: "auth.login.success",
   authLoginFailed: "auth.login.failed",
   authAccountLocked: "auth.account.locked",
+  authThrottled: "auth.throttled",
+  csrfRejected: "auth.csrf.rejected",
   authMfaSuccess: "auth.mfa.success",
   authMfaFailed: "auth.mfa.failed",
   authMfaEnrolled: "auth.mfa.enrolled",

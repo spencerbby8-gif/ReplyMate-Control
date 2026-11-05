@@ -217,9 +217,3 @@ export const navItems: NavItem[] = navGroups.flatMap((g) => g.items);
 export function findNavByHref(href: string): NavItem | undefined {
   return navItems.find((i) => i.href === href);
 }
-
-/** Maps a capability to the roles that hold it, derived from the registry. */
-export function rolesForCapability(capability: Capability): AdminRole[] {
-  const item = navItems.find((i) => i.capability === capability);
-  return item ? item.roles : MANAGE;
-}

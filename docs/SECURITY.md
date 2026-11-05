@@ -104,17 +104,35 @@ prohibition stays visible.
   parameter builder.
 - The one place raw SQL appears is `select 1` in the health and probe checks.
 
-## 9. Known limitations (stated, not hidden)
+## 9. Hardening applied after the independent review
 
-- **No CSRF token.** Sessions are `SameSite=Lax` cookies and every mutation is a `POST` with a JSON
-  body, which Lax plus the preflight requirement covers. A dedicated origin check would still be a
-  reasonable hardening step.
-- **No rate limiting on the login endpoint** beyond the per-account lockout. An IP-level limiter
-  belongs in front of the app (proxy or edge), not in this codebase.
-- **No scheduled probe runs.** Monitoring is on-demand; the page says so rather than implying
-  continuous coverage.
-- **`AUTH_PROVIDER=supabase` is wired but not exercised** in this environment, because no Supabase
-  project credentials were available. The `local` provider is fully functional and is what the tests
-  and smoke checks cover.
-- **Session digests use a fixed pepper.** A per-deployment pepper derived from `CONTROL_ENC_KEY`
-  would be marginally stronger; the 256-bit token entropy is what actually protects sessions.
+The following were found by reviewing PR #1 against its own claims and are now fixed, each with a
+regression test:
+
+| Finding | Fix | Test |
+|---|---|---|
+| `AUTH_PROVIDER=supabase` was accepted, rendered and documented but the login route never branched on it — a dead control on the *identity provider* | `lib/auth/identity.ts` strategy layer. Supabase mode verifies against Supabase Auth, invites through `auth.admin.inviteUserByEmail`, activates the role holder on first verified sign-in, and **fails closed with 503** when unconfigured rather than falling back to local hashes | `tests/identity.test.ts` |
+| No CSRF defence beyond `SameSite=Lax`, a browser behaviour the server does not control | `lib/auth/csrf.ts`: `Sec-Fetch-Site` when present, `Origin`/`Referer` host match otherwise, non-browser clients allowed. Wired into `apiRequire` (all 18 actions) and every auth route | `tests/csrf.test.ts` |
+| Only per-account lockout — one client could try five passwords against ten thousand accounts | `lib/auth/rate-limit.ts`: database-backed source throttle with a *distinct-target* limit that trips before the raw volume limit. Stores HMAC digests of IP and email, never the raw values | `tests/rate-limit.test.ts` |
+| Sessions slid forever; a stolen cookie used continuously never expired | Absolute ceiling (`SESSION_ABSOLUTE_TTL_HOURS`, default 72h). Idle extension and MFA extension are both clamped to it | `tests/session-policy.test.ts` |
+| An expired account lock left the failure counter at its maximum, so the next single failure re-locked instantly | `lockoutState` reports `expiredLock` and an `effectiveCount` of 0; the login route passes that to the counter | `tests/session-policy.test.ts` |
+| Session/invite token digests were an HMAC keyed with a pepper **hardcoded in source** | Keyed from `CONTROL_ENC_KEY`; `digestKeyStrength()` reports `keyed`/`unkeyed` and the login page shows it | `tests/session-policy.test.ts` |
+| Audit immutability was an application-level promise only | Database `BEFORE UPDATE`/`BEFORE DELETE` triggers raising `42501`, applied by `scripts/apply-hardening.ts`, which proves its own effect against a real probe row | script self-verification |
+| No RLS story for a shared Supabase project | `supabase/migrations/0001_control_plane.sql`: RLS enabled with **no** policies, `anon` and `authenticated` revoked, default privileges altered — the drift ReplyMate fixed in its own migration 0003, pre-empted here | migration ships verification queries |
+| The escalation matrix was inline in the executor, so it could only be tested with a database and a session | Extracted to the pure `lib/authz/escalation.ts`; owner-specific rules now precede the generic rank rule so refusals report a *specific* reason; self-demotion is refused outright | `tests/escalation.test.ts` (34 cases) |
+| Dead code: `rolesForCapability`, `withPrivacyGuard`, a `limit(0)` query in an assistant tool, `void posture`/`void recent`/`void started` stubs, a discarded query builder in `listAudit`, unused re-exports | Removed. `listAudit` now supports outcome/date filters and keyset pagination, which the Activity feed uses | — |
+
+## 10. Known limitations (stated, not hidden)
+
+- **Source throttle groups by IP + user-agent prefix.** A shared NAT is therefore throttled as one
+  source. That is the honest trade-off for not building a location history; the digests are one-way.
+- **No IP allow-list or geo policy.** Belongs at the edge, not in this codebase.
+- **`TRUNCATE` on `ctl_audit_log` cannot be blocked by a trigger.** It is constrained by privilege
+  instead: the hardening script revokes it from the application role, and the table owner is the only
+  remaining path. Documented rather than pretended away.
+- **Supabase Auth MFA is delegated, not reimplemented.** In supabase mode the factor is verified by
+  Supabase; this app's own TOTP implementation is used in local mode. `ctl_admin.mfa_enrolled_at`
+  therefore describes the local factor only.
+- **No scheduled probe runs.** Monitoring is on-demand; the page says so.
+- **No scheduled pruning.** `pruneLoginAttempts()` and `purgeExpiredSessions()` exist and are tested,
+  but nothing calls them on a timer yet.

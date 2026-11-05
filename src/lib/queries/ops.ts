@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, isNull, lt } from "drizzle-orm";
 import { db } from "@/db";
 import {
   ctlAiProvider,
@@ -57,18 +57,27 @@ export async function listTickets() {
   return db.select().from(ctlSupportTicket).orderBy(desc(ctlSupportTicket.createdAt));
 }
 
-export async function listAudit(options?: { limit?: number; action?: string; actorId?: string }) {
+export type AuditFilter = {
+  limit?: number;
+  action?: string;
+  actorId?: string;
+  outcome?: "success" | "denied" | "error";
+  since?: Date;
+  /** Keyset pagination: return rows strictly older than this id. */
+  beforeId?: number;
+};
+
+export async function listAudit(options: AuditFilter = {}) {
   const conditions = [];
-  if (options?.action) conditions.push(eq(ctlAuditLog.action, options.action));
-  if (options?.actorId) conditions.push(eq(ctlAuditLog.actorAdminId, options.actorId));
-  const query = db
-    .select()
-    .from(ctlAuditLog)
-    .orderBy(desc(ctlAuditLog.ts))
-    .limit(options?.limit ?? 100);
-  return conditions.length > 0
-    ? db.select().from(ctlAuditLog).where(and(...conditions)).orderBy(desc(ctlAuditLog.ts)).limit(options?.limit ?? 100)
-    : query;
+  if (options.action) conditions.push(eq(ctlAuditLog.action, options.action));
+  if (options.actorId) conditions.push(eq(ctlAuditLog.actorAdminId, options.actorId));
+  if (options.outcome) conditions.push(eq(ctlAuditLog.outcome, options.outcome));
+  if (options.since) conditions.push(gte(ctlAuditLog.ts, options.since));
+  if (options.beforeId) conditions.push(lt(ctlAuditLog.id, options.beforeId));
+
+  const base = db.select().from(ctlAuditLog).$dynamic();
+  if (conditions.length > 0) base.where(and(...conditions));
+  return base.orderBy(desc(ctlAuditLog.ts), desc(ctlAuditLog.id)).limit(options.limit ?? 100);
 }
 
 export async function distinctAuditActions() {
