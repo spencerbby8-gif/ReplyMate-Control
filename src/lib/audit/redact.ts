@@ -52,12 +52,21 @@ export function redactValue<T>(input: T, depth = 0): T | string | null {
   if (depth > MAX_DEPTH) return "[truncated-depth]";
   if (input === null || input === undefined) return input as null;
 
+  if (typeof input === "number" || typeof input === "boolean") {
+    // A number or a boolean cannot be a credential, so it survives even under a
+    // secret-shaped key. This matters: without it the redactor destroys useful
+    // audit facts such as `expiredSessions: 3` purely because the key contains
+    // the word "session". Over-redaction that blanks counts makes an audit log
+    // useless, and a useless audit log gets switched off.
+    //
+    // Secrets are strings. Only strings are screened against the value patterns.
+    return input;
+  }
+
   if (typeof input === "string") {
     if (isSecretLikeValue(input)) return REDACTED;
     return input.length > MAX_STRING ? `${input.slice(0, MAX_STRING)}…` : input;
   }
-
-  if (typeof input === "number" || typeof input === "boolean") return input;
 
   if (input instanceof Date) return input.toISOString() as unknown as T;
 
@@ -68,7 +77,12 @@ export function redactValue<T>(input: T, depth = 0): T | string | null {
   if (typeof input === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-      if (isSecretLikeKey(key)) {
+      // A numeric or boolean value cannot be a credential, so it survives even
+      // under a secret-shaped key. Without this, `expiredSessions: 3` is blanked
+      // purely because the key contains "session" — over-redaction that destroys
+      // the audit facts an operator actually needs.
+      const isScalarNonSecret = typeof value === "number" || typeof value === "boolean";
+      if (isSecretLikeKey(key) && !isScalarNonSecret) {
         out[key] = REDACTED;
         continue;
       }
@@ -100,11 +114,13 @@ export function diffForAudit(
     const a = before[key];
     const b = after[key];
     if (JSON.stringify(a) !== JSON.stringify(b)) {
-      const secret = isSecretLikeKey(key);
+      // Same rule as redactValue: a number or boolean is never a credential.
+      const secretScalar = (value: unknown) =>
+        isSecretLikeKey(key) && typeof value !== "number" && typeof value !== "boolean";
       const content = CONTENT_KEY.test(key);
       changes[key] = {
-        from: secret ? REDACTED : content && typeof a === "string" ? CONTENT_REMOVED : redactValue(a),
-        to: secret ? REDACTED : content && typeof b === "string" ? CONTENT_REMOVED : redactValue(b),
+        from: secretScalar(a) ? REDACTED : content && typeof a === "string" ? CONTENT_REMOVED : redactValue(a),
+        to: secretScalar(b) ? REDACTED : content && typeof b === "string" ? CONTENT_REMOVED : redactValue(b),
       };
     }
   }

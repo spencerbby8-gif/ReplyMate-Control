@@ -57,6 +57,7 @@ export const auditActions = {
   accessDenied: "authz.denied",
   privacyViolation: "privacy.violation",
   supabaseRead: "supabase.read",
+  maintenanceRun: "maintenance.run",
 } as const;
 
 export type AuditAction = (typeof auditActions)[keyof typeof auditActions];

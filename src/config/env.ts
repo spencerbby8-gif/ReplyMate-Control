@@ -76,6 +76,10 @@ const envSchema = z.object({
   SUPABASE_PUBLISHABLE_KEY: optionalString,
   SUPABASE_SECRET_KEY: optionalString,
   SUPABASE_TRANSACTION_POOLER: optionalString,
+  /** Minutes between in-process maintenance passes. 0 (default) disables it.
+   *  An in-process interval is NOT a durable scheduler; see src/instrumentation.ts. */
+  MAINTENANCE_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(1440).default(0),
+
   /** Optional session-mode pooler, for operations the transaction pooler rejects. */
   SUPABASE_SESSION_POOLER: optionalString,
 

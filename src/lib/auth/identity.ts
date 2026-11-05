@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { env, supabase, supabaseBridgeConfigured } from "@/config/env";
 import { hashPassword, verifyPassword as verifyLocalPassword } from "./crypto";
+import { isAnonymousIdentity } from "./role-mapping";
 
 /**
  * Identity strategies.
@@ -25,7 +26,13 @@ import { hashPassword, verifyPassword as verifyLocalPassword } from "./crypto";
 export type IdentityProviderName = "local" | "supabase";
 
 export type VerifyResult =
-  | { ok: true; externalUserId: string | null; mfaEnrolledExternally: boolean }
+  | {
+      ok: true;
+      externalUserId: string | null;
+      mfaEnrolledExternally: boolean;
+      /** True for an anonymous sign-in, which is never an administrator. */
+      anonymous: boolean;
+    }
   | { ok: false; code: "invalid_credentials" | "provider_unavailable" | "upstream_error"; reason: string };
 
 export type InviteResult =
@@ -67,7 +74,7 @@ export const localIdentity: IdentityProvider = {
   async verify(_email, _password) {
     // The local strategy is driven by the stored hash on the ctl_admin row, which
     // the caller already has. This exists so both strategies satisfy one shape.
-    return { ok: true, externalUserId: null, mfaEnrolledExternally: false };
+    return { ok: true, externalUserId: null, mfaEnrolledExternally: false, anonymous: false };
   },
 
   async invite() {
@@ -211,7 +218,16 @@ export const supabaseIdentity: IdentityProvider = {
       (factor) => factor.factor_type === "totp" && factor.status === "verified",
     );
 
-    return { ok: true, externalUserId: user.id, mfaEnrolledExternally };
+    return {
+      ok: true,
+      externalUserId: user.id,
+      mfaEnrolledExternally,
+      anonymous: isAnonymousIdentity({
+        is_anonymous: (user as { is_anonymous?: boolean }).is_anonymous,
+        email: user.email,
+        app_metadata: (user.app_metadata ?? null) as { provider?: string } | null,
+      }),
+    };
   },
 
   async invite(email, options) {
@@ -222,6 +238,20 @@ export const supabaseIdentity: IdentityProvider = {
         code: "provider_unavailable",
         reason:
           "Inviting through Supabase Auth needs SUPABASE_SECRET_KEY. Refusing to create a control-plane-only invite that the operator would believe is a Supabase identity.",
+      };
+    }
+
+    // `auth.admin.inviteUserByEmail` CREATES A ROW IN THE PRODUCTION auth.users
+    // TABLE of the ReplyMate project. That is a production data change, so it is
+    // gated behind an explicit opt-in and fails closed by default. An operator
+    // clicking "Invite administrator" must not be able to write to the app's
+    // production identity store as a side effect.
+    if (process.env.SUPABASE_ALLOW_ADMIN_INVITE?.trim().toLowerCase() !== "true") {
+      return {
+        ok: false,
+        code: "provider_unavailable",
+        reason:
+          "Supabase admin invitation is disabled. It would create a user in the production ReplyMate auth.users table, which needs owner approval. Set SUPABASE_ALLOW_ADMIN_INVITE=true to enable it, or invite with AUTH_PROVIDER=local.",
       };
     }
 

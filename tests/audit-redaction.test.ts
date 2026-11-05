@@ -165,3 +165,79 @@ describe("audit diffs", () => {
     expect(diffForAudit({ a: 1 }, undefined)).toEqual({});
   });
 });
+
+describe("over-redaction guard: a number is never a credential", () => {
+  // Regression found in production: `expiredSessions: 3` was blanked to
+  // "[redacted]" purely because the key contains "session", which destroyed the
+  // single most useful fact in a maintenance audit row.
+  it("keeps a numeric value under a secret-shaped key", () => {
+    const out = redactValue({
+      expiredSessions: 3,
+      idleAssistantSessions: 0,
+      staleLoginAttempts: 5,
+      sessionCount: 12,
+      tokenCount: 0,
+    }) as Record<string, unknown>;
+    expect(out.expiredSessions).toBe(3);
+    expect(out.idleAssistantSessions).toBe(0);
+    expect(out.staleLoginAttempts).toBe(5);
+    expect(out.sessionCount).toBe(12);
+    expect(out.tokenCount).toBe(0);
+  });
+
+  it("keeps a boolean under a secret-shaped key", () => {
+    const out = redactValue({ mfaRequired: true, sessionActive: false }) as Record<string, unknown>;
+    expect(out.mfaRequired).toBe(true);
+    expect(out.sessionActive).toBe(false);
+  });
+
+  it("still redacts a STRING under the same key — the distinction is the type, not the key", () => {
+    const out = redactValue({
+      expiredSessions: 3,
+      sessionToken: "abc123def456",
+      token: "a-real-looking-token-value",
+    }) as Record<string, unknown>;
+    expect(out.expiredSessions).toBe(3);
+    expect(out.sessionToken).toBe(REDACTED);
+    expect(out.token).toBe(REDACTED);
+  });
+
+  it("still redacts a nested object under a secret-shaped key", () => {
+    const out = redactValue({ session: { id: "abc" } }) as Record<string, unknown>;
+    expect(out.session).toBe(REDACTED);
+  });
+
+  it("applies the same rule inside arrays", () => {
+    const out = redactValue({ rows: [{ expiredSessions: 2 }, { token: "abc" }] }) as {
+      rows: Array<Record<string, unknown>>;
+    };
+    expect(out.rows[0].expiredSessions).toBe(2);
+    expect(out.rows[1].token).toBe(REDACTED);
+  });
+
+  it("preserves numeric counts on both sides of an audit diff", () => {
+    const diff = diffForAudit({ expiredSessions: 1 }, { expiredSessions: 4 });
+    expect(diff.expiredSessions).toEqual({ from: 1, to: 4 });
+  });
+
+  it("still redacts a string on both sides of a diff under a secret key", () => {
+    const diff = diffForAudit({ apiKey: "old" }, { apiKey: "new" });
+    expect(diff.apiKey).toEqual({ from: REDACTED, to: REDACTED });
+  });
+
+  it("keeps a real maintenance report fully legible", () => {
+    const report = {
+      trigger: "manual",
+      pruned: {
+        expiredSessions: 3,
+        staleLoginAttempts: 5,
+        expiredInvites: 2,
+        idleAssistantSessions: 0,
+      },
+      errors: [],
+      retentionDays: { loginAttempts: 7, aiops: 30 },
+    };
+    const out = redactValue(report) as typeof report;
+    expect(out).toEqual(report);
+  });
+});

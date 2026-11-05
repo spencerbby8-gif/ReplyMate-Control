@@ -7,6 +7,7 @@ import {
   registerFailedLogin,
 } from "@/lib/auth/session";
 import { identityProvider } from "@/lib/auth/identity";
+import { requireRoleRow } from "@/lib/auth/role-mapping";
 import { checkLoginThrottle, recordLoginAttempt } from "@/lib/auth/rate-limit";
 import { verifyCsrf } from "@/lib/auth/csrf";
 import { clientIp, jsonError, jsonOk, newRequestId, userAgent } from "@/lib/http";
@@ -186,6 +187,41 @@ export async function POST(request: Request) {
     }
     passwordValid = true;
     externalUserId = result.externalUserId;
+
+    // Authentication succeeded, but authorization is decided here: a valid
+    // Supabase session proves somebody signed in, not that they administer
+    // anything. `disable_signup` is false on the live project and anonymous
+    // sign-in is enabled, so an IdP-side identity carries no privilege at all.
+    const mapping = requireRoleRow({
+      supabaseUserId: result.externalUserId,
+      isAnonymous: result.anonymous,
+      adminRow: { role: admin.role, status: admin.status },
+    });
+    if (!mapping.allowed) {
+      await recordLoginAttempt({
+        ip,
+        userAgent: agent,
+        email,
+        outcome: "failure",
+        reason: mapping.code,
+      });
+      await recordAudit({
+        action: auditActions.accessDenied,
+        actorAdminId: admin.id,
+        actorEmail: admin.email,
+        actorRole: admin.role,
+        entity: "role_mapping",
+        entityId: admin.id,
+        outcome: "denied",
+        requestId,
+        ip,
+        userAgent: agent,
+        detail: { provider: "supabase", code: mapping.code, externalUserId: result.externalUserId },
+      });
+      // Deliberately the same body as a credential failure: the fact that a
+      // Supabase identity exists but has no admin row is not disclosed.
+      return jsonError("Email or password is incorrect.", 401, "invalid_credentials", requestId);
+    }
   } else {
     // Local strategy: verify against the stored scrypt hash. A row with no hash
     // is an unredeemed invitation, not a password-less account.

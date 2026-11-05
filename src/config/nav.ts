@@ -49,6 +49,7 @@ export const capabilities = [
   "security:view",
   "security:manage",
   "privacy:view",
+  "maintenance:run",
 ] as const;
 
 export type Capability = (typeof capabilities)[number];

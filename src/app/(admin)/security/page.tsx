@@ -1,22 +1,25 @@
 import type { Metadata } from "next";
-import { AlertTriangle, KeyRound, MonitorSmartphone, ShieldCheck, TicketCheck } from "lucide-react";
+import { AlertTriangle, History as HistoryIcon, KeyRound, MonitorSmartphone, ShieldCheck, TicketCheck } from "lucide-react";
 import { PageHeader } from "@/components/shared/page-header";
 import { StatCard } from "@/components/shared/stat-card";
 import { EmptyState } from "@/components/shared/empty-state";
 import { StatusBadge, Dot } from "@/components/shared/status-badge";
 import { AsyncAction } from "@/components/shared/async-action";
 import { MfaEnrolment } from "@/components/forms/interactive";
+import { LOGIN_THROTTLE } from "@/lib/auth/rate-limit";
+import { AIOPS_RETENTION_DAYS } from "@/lib/maintenance/runner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { requireCapability } from "@/lib/authz/guard";
+import { can } from "@/lib/authz/permissions";
 import { envReport } from "@/config/env";
 import { encryptionAvailable } from "@/lib/auth/crypto";
 import { keyStateReport } from "@/lib/auth/key-state";
 import { LOCKOUT, listActiveSessions } from "@/lib/auth/session";
 import { formatDateTime, formatRelative } from "@/lib/utils";
-import { mfaPosture } from "@/lib/queries/admins";
+import { lastMaintenanceRun, maintenanceRunCount, mfaPosture } from "@/lib/queries/admins";
 import { auditStats } from "@/lib/queries/ops";
 
 export const dynamic = "force-dynamic";
@@ -25,13 +28,16 @@ export const metadata: Metadata = { title: "Security" };
 export default async function SecurityPage() {
   const { admin } = await requireCapability("security:view");
   const report = envReport();
-  const [sessions, posture, audit] = await Promise.all([
+  const [sessions, posture, audit, maintenance, maintenanceRuns] = await Promise.all([
     listActiveSessions(),
     mfaPosture(),
     auditStats(),
+    lastMaintenanceRun(),
+    maintenanceRunCount(),
   ]);
 
   const encReady = encryptionAvailable();
+  const canRunMaintenance = can(admin.role, "maintenance:run");
   const keyState = await keyStateReport();
 
   return (
@@ -169,6 +175,79 @@ export default async function SecurityPage() {
               <p className="mt-1 leading-relaxed">256-bit CSPRNG cookie, stored as a digest only, sliding {report.controlPlane.sessionTtlHours}h expiry, HttpOnly + SameSite=Lax.</p>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <HistoryIcon className="size-4 text-primary" aria-hidden />
+            Maintenance
+          </CardTitle>
+          <CardDescription>
+            Prunes expired sessions, stale login-throttle rows, expired invitations and idle
+            assistant sessions. Sourced from recorded executions, not from configuration — an
+            interval being set is not evidence that it ran.
+          </CardDescription>
+          {canRunMaintenance ? (
+            <CardAction>
+              <AsyncAction
+                endpoint="/api/maintenance/run"
+                label="Run maintenance now"
+                icon={<HistoryIcon className="size-4" aria-hidden />}
+                confirm="Run one maintenance pass? It deletes expired sessions, throttle rows past retention, expired un-redeemed invitations and assistant sessions idle over 30 days. The run is recorded in the audit log."
+              />
+            </CardAction>
+          ) : null}
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {maintenance === null ? (
+            <div className="rounded-lg border border-dashed px-4 py-6 text-center">
+              <p className="text-sm font-semibold">Maintenance has never run</p>
+              <p className="mx-auto mt-1.5 max-w-xl text-xs leading-relaxed text-muted-foreground">
+                {maintenanceRuns === 0
+                  ? "No `maintenance.run` entry exists in the audit log. Nothing is claimed to be scheduled until an execution is recorded."
+                  : "No readable run record."}{" "}
+                The in-process interval is opt-in via{" "}
+                <span className="font-mono">MAINTENANCE_INTERVAL_MINUTES</span> and is not a durable
+                scheduler: it stops with the process and never fires in a serverless deployment. For a
+                guarantee, drive <span className="font-mono">POST /api/maintenance/run</span> from an
+                external cron.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={maintenance.outcome === "success" ? "success" : "warning"} className="font-mono text-[10px]">
+                  {maintenance.outcome}
+                </Badge>
+                <Badge variant="outline" className="font-mono text-[10px]">trigger: {maintenance.trigger}</Badge>
+                <span className="font-mono text-[11px] text-muted-foreground">{formatDateTime(maintenance.ts)}</span>
+                <span className="text-[11px] text-muted-foreground">({formatRelative(maintenance.ts)})</span>
+                <span className="ml-auto font-mono text-[11px] text-muted-foreground">
+                  {maintenanceRuns} run{maintenanceRuns === 1 ? "" : "s"} recorded
+                </span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-4">
+                {Object.entries(maintenance.pruned).map(([key, value]) => (
+                  <div key={key} className="rounded-md border p-2.5">
+                    <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{key}</p>
+                    <p className="mt-0.5 font-mono text-lg font-semibold tabular-nums">{value}</p>
+                  </div>
+                ))}
+              </div>
+              {maintenance.errors.length > 0 ? (
+                <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+                  {maintenance.errors.length} step(s) failed: {maintenance.errors.join("; ")}
+                </p>
+              ) : null}
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Retention: login-throttle rows {LOGIN_THROTTLE.retentionDays} days, assistant sessions{" "}
+                {AIOPS_RETENTION_DAYS} days. Sessions are pruned once past their expiry; the audit log
+                is never pruned, because it is append-only by database trigger.
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 

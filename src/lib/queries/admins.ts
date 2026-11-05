@@ -154,3 +154,48 @@ export async function activeSessionCount() {
     .where(and(isNull(ctlSession.revokedAt), gt(ctlSession.expiresAt, new Date())));
   return row?.value ?? 0;
 }
+
+/**
+ * The last ACTUAL maintenance run, read from the audit log.
+ *
+ * Deliberately sourced from recorded executions rather than from configuration:
+ * an interval being configured is not evidence it ran. `null` means no run has
+ * ever been recorded, and the UI says exactly that.
+ */
+export async function lastMaintenanceRun() {
+  const rows = await db
+    .select({
+      ts: ctlAuditLog.ts,
+      outcome: ctlAuditLog.outcome,
+      detail: ctlAuditLog.detail,
+      actorEmail: ctlAuditLog.actorEmail,
+    })
+    .from(ctlAuditLog)
+    .where(eq(ctlAuditLog.action, "maintenance.run"))
+    .orderBy(desc(ctlAuditLog.ts))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  const detail = (row.detail ?? {}) as {
+    trigger?: string;
+    pruned?: Record<string, number>;
+    errors?: string[];
+  };
+  return {
+    ts: row.ts,
+    outcome: row.outcome,
+    trigger: detail.trigger ?? "unknown",
+    pruned: detail.pruned ?? {},
+    errors: detail.errors ?? [],
+    actor: row.actorEmail,
+  };
+}
+
+/** Count of recorded maintenance runs, so "it has never run" is provable. */
+export async function maintenanceRunCount() {
+  const [row] = await db
+    .select({ value: count() })
+    .from(ctlAuditLog)
+    .where(eq(ctlAuditLog.action, "maintenance.run"));
+  return row?.value ?? 0;
+}

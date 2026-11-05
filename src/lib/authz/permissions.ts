@@ -43,6 +43,7 @@ const matrix: Record<AdminRole, ReadonlySet<Capability>> = {
     "aiops:use",
     "audit:view",
     "security:view",
+    "maintenance:run",
     "privacy:view",
     "subscriptions:view",
   ]),
