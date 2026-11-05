@@ -17,6 +17,8 @@ import { can } from "@/lib/authz/permissions";
 import { envReport } from "@/config/env";
 import { encryptionAvailable } from "@/lib/auth/crypto";
 import { keyStateReport } from "@/lib/auth/key-state";
+import { gatherCutoverFacts } from "@/lib/supabase/cutover-live";
+import { evaluateCutover } from "@/lib/supabase/cutover";
 import { LOCKOUT, listActiveSessions } from "@/lib/auth/session";
 import { formatDateTime, formatRelative } from "@/lib/utils";
 import { lastMaintenanceRun, maintenanceRunCount, mfaPosture } from "@/lib/queries/admins";
@@ -39,6 +41,9 @@ export default async function SecurityPage() {
   const encReady = encryptionAvailable();
   const canRunMaintenance = can(admin.role, "maintenance:run");
   const keyState = await keyStateReport();
+  // Live, read-only. Runs on every render of this page; two GETs and four COUNTs.
+  const { facts: cutoverFacts, notes: cutoverNotes } = await gatherCutoverFacts();
+  const cutover = evaluateCutover(cutoverFacts);
 
   return (
     <>
@@ -147,6 +152,66 @@ export default async function SecurityPage() {
         <StatCard label="Denied actions" value={audit.denied} hint="Authorization refusals, all audited" icon={TicketCheck} tone={audit.denied > 0 ? "warning" : "positive"} />
         <StatCard label="Privacy violations" value={audit.privacyViolations} hint="Attempts to read denied content tables" icon={KeyRound} tone={audit.privacyViolations > 0 ? "critical" : "positive"} />
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <ShieldCheck className="size-4 text-primary" aria-hidden />
+            Supabase Auth cutover preflight
+          </CardTitle>
+          <CardDescription>
+            Live, read-only assessment of whether <span className="font-mono">AUTH_PROVIDER</span> can
+            move from <span className="font-mono">local</span> to{" "}
+            <span className="font-mono">supabase</span>. Nothing here changes a project setting.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={cutover.ready ? "success" : cutover.blocking.length > 0 ? "destructive" : "warning"}>
+              {cutover.ready ? "ready" : `${cutover.blocking.length} blocking`}
+            </Badge>
+            <span className="text-xs text-muted-foreground">{cutover.summary}</span>
+          </div>
+          <ul className="space-y-2">
+            {cutover.checks.map((check) => (
+              <li key={check.id} className="rounded-md border p-3">
+                <div className="flex items-start gap-2">
+                  <Dot
+                    tone={
+                      check.status === "pass" ? "success"
+                        : check.status === "fail" ? "destructive"
+                        : check.status === "warn" ? "warning" : "muted"
+                    }
+                    pulse={check.status === "fail"}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-semibold">{check.title}</p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{check.detail}</p>
+                    {check.action ? (
+                      <p className="mt-1.5 text-[11px] leading-relaxed">
+                        <span className="font-medium">Action:</span> {check.action}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Badge variant="outline" className="shrink-0 font-mono text-[10px]">{check.status}</Badge>
+                </div>
+              </li>
+            ))}
+          </ul>
+          {cutoverNotes.length > 0 ? (
+            <ul className="space-y-1 border-t pt-3">
+              {cutoverNotes.map((note) => (
+                <li key={note} className="text-[11px] text-muted-foreground">· {note}</li>
+              ))}
+            </ul>
+          ) : null}
+          <p className="border-t pt-3 text-[11px] leading-relaxed text-muted-foreground">
+            Reproduce from a shell with{" "}
+            <span className="font-mono">npx tsx scripts/supabase-cutover-preflight.ts</span>, which
+            exits non-zero when the cutover is not ready.
+          </p>
+        </CardContent>
+      </Card>
 
       <Card id="mfa">
         <CardHeader>
